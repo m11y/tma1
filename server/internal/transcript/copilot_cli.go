@@ -245,7 +245,7 @@ func (w *Watcher) loadCopilotCLIIngestedDirs() {
 func (w *Watcher) fetchCopilotCLIMaxTs(sessionID string) int64 {
 	form := url.Values{}
 	dbSid := copilotCLISessionPrefix + sessionID
-	form.Set("sql", "SELECT MAX(ts) FROM tma1_hook_events WHERE session_id = '"+strings.ReplaceAll(dbSid, "'", "''")+"'")
+	form.Set("sql", "SELECT MAX(ts) FROM tma1_hook_events WHERE session_id = '"+escapeSQLString(dbSid)+"'")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	req, err := newPostRequest(ctx, w.sqlURL, form)
@@ -501,16 +501,40 @@ func (w *Watcher) processCopilotCLILine(sessionID, line string, seen map[string]
 		seen[ev.ID] = struct{}{}
 	}
 
-	// Split on session.start: if the JSONL contains multiple logical sessions
-	// (appended across restarts), update fctx.sessionID to create separate DB sessions.
-	if ev.Type == "session.start" {
+	// State updates that must propagate even when the event is dropped by the
+	// skip check below. session.start carries cwd; session.model_change carries
+	// the active model. If those events predate skipUntilTsMs (e.g. on watcher
+	// restart over a partially-ingested multi-session JSONL), their downstream
+	// handlers never run, so fctx.cwd / fctx.model would otherwise stay empty
+	// and leak into post-threshold inserts.
+	switch ev.Type {
+	case "session.start":
 		var startData struct {
 			SessionID string `json:"sessionId"`
+			Context   struct {
+				CWD string `json:"cwd"`
+			} `json:"context"`
 		}
-		if json.Unmarshal(ev.Data, &startData) == nil && startData.SessionID != "" && startData.SessionID != fctx.sessionID {
-			fctx.sessionID = startData.SessionID
-			fctx.model = ""
-			fctx.cwd = ""
+		if json.Unmarshal(ev.Data, &startData) == nil {
+			// Rollover: a new logical session inside the same on-disk JSONL.
+			// Reset model and refresh the skip threshold for the new session_id.
+			if startData.SessionID != "" && startData.SessionID != fctx.sessionID {
+				fctx.sessionID = startData.SessionID
+				fctx.model = ""
+				fctx.skipUntilTsMs = w.fetchCopilotCLIMaxTs(fctx.sessionID)
+				fctx.lastTsMs = fctx.skipUntilTsMs
+			}
+			// Always capture cwd from session.start so it survives the skip check.
+			// handleCopilotCLISessionStart re-assigns the same value when the
+			// event is not skipped (idempotent).
+			fctx.cwd = startData.Context.CWD
+		}
+	case "session.model_change":
+		var mc struct {
+			NewModel string `json:"newModel"`
+		}
+		if json.Unmarshal(ev.Data, &mc) == nil && mc.NewModel != "" {
+			fctx.model = mc.NewModel
 		}
 	}
 
