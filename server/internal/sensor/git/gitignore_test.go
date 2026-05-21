@@ -10,6 +10,7 @@ func TestParseGitignoreIgnoresCommentsAndEmpty(t *testing.T) {
 	m := parseGitignore("# comment\n\n  \nbin/\n*.log\n")
 	if m == nil {
 		t.Fatal("expected non-nil matcher")
+		return // unreachable, but appeases staticcheck's SA5011 below
 	}
 	if len(m.dirs) != 1 || m.dirs[0] != "bin" {
 		t.Errorf("dirs = %v, want [bin]", m.dirs)
