@@ -105,6 +105,63 @@ func TestRenderSummaryStaysShort(t *testing.T) {
 	}
 }
 
+func TestRenderSummaryDeltaEmitsOnlyFlaggedSections(t *testing.T) {
+	// Anomaly-only delta should ship the anomalies block + the project
+	// header, but NOT session counters or build status. This is the
+	// turn-over-turn case where the only actionable news is a new
+	// anomaly — re-emitting duration / tool_calls is pure noise.
+	exit := 0
+	b := &Bundle{
+		Project: "tma1",
+		Session: &SessionState{SessionID: "abcdef", DurationMinutes: 42, ToolCallCount: 88},
+		Build:   &BuildStatus{Tag: "make", LastExitCode: &exit},
+		Anomalies: []Anomaly{
+			{Kind: "stale_file_view", Severity: SeverityHigh, Suggestion: "Re-read foo.go"},
+		},
+	}
+	got := b.RenderSummaryDelta(DigestDelta{Anomalies: true})
+	if !strings.Contains(got, "anomalies:") {
+		t.Errorf("anomalies block missing: %q", got)
+	}
+	for _, unwanted := range []string{"session:", "duration:", "tool_calls:", "build:"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("delta=Anomalies-only leaked %q\nfull:\n%s", unwanted, got)
+		}
+	}
+	if !strings.Contains(got, "project: tma1") {
+		t.Errorf("project header missing on non-empty delta: %q", got)
+	}
+}
+
+func TestRenderSummaryDeltaEmptyDeltaProducesEmptyString(t *testing.T) {
+	b := &Bundle{
+		Project:   "tma1",
+		Session:   &SessionState{SessionID: "abc", DurationMinutes: 30},
+		Anomalies: []Anomaly{{Kind: "x", Severity: SeverityHigh, Suggestion: "y"}},
+	}
+	if got := b.RenderSummaryDelta(DigestDelta{}); got != "" {
+		t.Errorf("empty delta should yield empty render, got %q", got)
+	}
+}
+
+func TestRenderSummaryDeltaAllSectionsMatchesRenderSummary(t *testing.T) {
+	// RenderSummary is now a thin wrapper around RenderSummaryDelta with
+	// every section flagged; outputs must be byte-identical so the
+	// existing hook protocol stays stable.
+	b := &Bundle{
+		Project: "tma1",
+		Session: &SessionState{SessionID: "abc", DurationMinutes: 10, ToolCallCount: 5, CurrentFocus: "/a/b/c.go"},
+		Anomalies: []Anomaly{
+			{Kind: "stale_file_view", Severity: SeverityHigh, Suggestion: "Re-read"},
+		},
+	}
+	full := b.RenderSummary()
+	delta := b.RenderSummaryDelta(AllSectionsDelta())
+	if full != delta {
+		t.Errorf("RenderSummary differs from AllSectionsDelta render\nfull:\n%s\n\ndelta:\n%s", full, delta)
+	}
+}
+
 func TestExtractFilesFocusesOnRecentEdits(t *testing.T) {
 	now := time.Now()
 	older := now.Add(-30 * time.Minute)

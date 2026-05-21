@@ -343,12 +343,18 @@ func (s *Server) generateInjection(ctx context.Context, payload hookPayload, raw
 			return ""
 		}
 		bundle := s.bundler.BuildBundle(ctx, payload.SessionID, payload.CWD)
-		// Suppress identical context turn after turn — the biggest noise
-		// source in dogfood. Counters that change every turn (duration,
-		// tokens) are excluded from the digest, so a turn that only
-		// advances those is correctly treated as "unchanged".
-		if s.injectionCache != nil && !s.injectionCache.IfChanged(payload.SessionID, bundle.Digest()) {
-			return ""
+		// Incremental injection: only re-emit sections whose content
+		// changed since the previous turn. First emit per session ships
+		// everything (Diff returns AllSectionsDelta on cold cache);
+		// turns whose only "change" is counters (excluded from the
+		// digest) get an empty delta → no injection. Cuts the 70%
+		// turn-over-turn duplicate observed in v1 dogfood.
+		if s.injectionCache != nil {
+			delta := s.injectionCache.Diff(payload.SessionID, bundle.Digest())
+			if delta.Empty() {
+				return ""
+			}
+			return bundle.RenderSummaryDelta(delta)
 		}
 		return bundle.RenderSummary()
 

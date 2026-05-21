@@ -137,144 +137,194 @@ func projectName(cwd string) string {
 	return pathutil.Basename(root)
 }
 
-// RenderSummary returns a markdown summary suitable for hook injection.
-// It is bounded to about 500 tokens / ~2 KB by truncating list lengths.
-// Returns an empty string when there is no session, no anomalies, no
-// build status, no external changes, and no project state — so we never
-// inject pure noise.
+// RenderSummary returns a full <tma1-context> markdown summary suitable
+// for hook injection (no incremental gating). Equivalent to
+// RenderSummaryDelta(AllSectionsDelta()).
+//
+// Bounded to about 500 tokens / ~2 KB by truncating list lengths.
+// Returns an empty string when no section produces content — so we
+// never inject pure noise.
 func (b *Bundle) RenderSummary() string {
-	if b == nil || (b.Session == nil && len(b.Anomalies) == 0 && b.Build == nil && b.External == nil && b.ProjectState == nil) {
+	return b.RenderSummaryDelta(AllSectionsDelta())
+}
+
+// RenderSummaryDelta renders only the bundle sections marked in delta.
+// This implements the plan's "增量优先（只列上 turn 之后变化）" budget:
+// when only the anomaly set changed since the previous turn, only the
+// anomalies block ships — counters + project orientation already in
+// the agent's context don't get re-emitted.
+//
+// Returns an empty string when delta is empty OR when no included
+// section actually has content to render.
+func (b *Bundle) RenderSummaryDelta(delta DigestDelta) string {
+	if b == nil || delta.Empty() {
 		return ""
 	}
-	var sb strings.Builder
+	var sections strings.Builder
 
-	sb.WriteString("<tma1-context>\n")
+	if delta.Project {
+		renderProjectStateLine(&sections, b.ProjectState)
+	}
+	if delta.Focus {
+		renderSessionBlock(&sections, b.Session)
+	}
+	if delta.Build {
+		renderBuildBlock(&sections, b.Build)
+	}
+	if delta.External {
+		renderExternalBlock(&sections, b.External)
+	}
+	if delta.Anomalies {
+		renderAnomaliesBlock(&sections, b.Anomalies)
+	}
+
+	if sections.Len() == 0 {
+		return ""
+	}
+
+	var out strings.Builder
+	out.Grow(sections.Len() + 64)
+	out.WriteString("<tma1-context>\n")
 	if b.Project != "" {
-		fmt.Fprintf(&sb, "project: %s\n", b.Project)
+		fmt.Fprintf(&out, "project: %s\n", b.Project)
 	}
-	if ps := b.ProjectState; ps != nil && ps.Language != "" {
-		// One short row — language and how to build/test it. Keeps the
-		// injection budget tight; agents can call get_project_state for
-		// the full key-files / top-level-dirs list.
-		row := "stack: " + ps.Language
-		if ps.BuildSystem != "" {
-			row += " · build=" + ps.BuildSystem
-		}
-		if ps.TestFramework != "" {
-			row += " · test=" + ps.TestFramework
-		}
-		fmt.Fprintln(&sb, row)
-	}
+	out.WriteString(sections.String())
+	out.WriteString("</tma1-context>")
+	return out.String()
+}
 
-	if s := b.Session; s != nil {
-		fmt.Fprintf(&sb, "session: %s\n", abbrev(s.SessionID, 8))
-		if s.DurationMinutes > 0 {
-			fmt.Fprintf(&sb, "duration: %d min\n", s.DurationMinutes)
-		}
-		if s.ToolCallCount > 0 {
-			fmt.Fprintf(&sb, "tool_calls: %d\n", s.ToolCallCount)
-		}
-		if s.TokensInput+s.TokensOutput > 0 {
-			fmt.Fprintf(&sb, "tokens: in=%d out=%d\n", s.TokensInput, s.TokensOutput)
-		}
-		if s.CurrentFocus != "" {
-			fmt.Fprintf(&sb, "current_focus: %s\n", shortPath(s.CurrentFocus))
-		}
-		if len(s.RecentTools) > 0 {
-			parts := make([]string, 0, 6)
-			for i, t := range s.RecentTools {
-				if i >= 6 {
-					break
-				}
-				parts = append(parts, fmt.Sprintf("%s×%d", t.Name, t.Count))
-			}
-			fmt.Fprintf(&sb, "tools: %s\n", strings.Join(parts, ", "))
-		}
-		if len(s.RecentFiles) > 0 {
-			short := make([]string, 0, 5)
-			for i, p := range s.RecentFiles {
-				if i >= 5 {
-					break
-				}
-				short = append(short, shortPath(p))
-			}
-			fmt.Fprintf(&sb, "recent_files: %s\n", strings.Join(short, ", "))
-		}
+// renderProjectStateLine — one terse row identifying language + build/test
+// system. Full project structure is available via get_project_state.
+func renderProjectStateLine(sb *strings.Builder, ps *ProjectState) {
+	if ps == nil || ps.Language == "" {
+		return
 	}
-
-	if bs := b.Build; bs != nil {
-		switch {
-		case bs.LastExitCode != nil && *bs.LastExitCode != 0:
-			fmt.Fprintf(&sb, "build: ❌ %s exit=%d\n", bs.Tag, *bs.LastExitCode)
-		case bs.LastExitCode != nil:
-			fmt.Fprintf(&sb, "build: ✅ %s exit=0\n", bs.Tag)
-		case bs.LastEventAt.IsZero():
-			// no recent activity
-		default:
-			fmt.Fprintf(&sb, "build: %s (running)\n", bs.Tag)
-		}
-		if bs.ErrorsInLast30Min > 0 {
-			fmt.Fprintf(&sb, "build_errors_30m: %d\n", bs.ErrorsInLast30Min)
-		}
-		// Surface the most recent stderr/error line whenever one exists.
-		// This is what an agent actually needs to act on; counts alone
-		// ("errors=2") don't tell it where to look. Bound to one line so
-		// the injection stays under the 500-token target.
-		//
-		// Prefix with a relative age and a "(recovered?)" hint when newer
-		// non-error events followed — otherwise the agent wastes effort
-		// chasing a stale error the build already moved past.
-		if last := bs.LastErrorMessage; last != "" {
-			age := relativeAge(bs.LastErrorAt)
-			recovered := !bs.LastErrorAt.IsZero() && bs.LastEventAt.After(bs.LastErrorAt.Add(10*time.Second))
-			tag := age
-			if recovered {
-				tag += ", may have recovered"
-			}
-			fmt.Fprintf(&sb, "build_last_error (%s): %s\n", tag, oneLine(last, 200))
-		}
+	row := "stack: " + ps.Language
+	if ps.BuildSystem != "" {
+		row += " · build=" + ps.BuildSystem
 	}
-
-	if ext := b.External; ext != nil && (ext.HumanCount > 0 || ext.GitCount > 0) {
-		if ext.HumanCount > 0 {
-			fmt.Fprintf(&sb, "external_human_changes: %d\n", ext.HumanCount)
-			short := make([]string, 0, 3)
-			for i, c := range ext.HumanChanges {
-				if i >= 3 {
-					break
-				}
-				short = append(short, shortPath(c.FilePath))
-			}
-			if len(short) > 0 {
-				fmt.Fprintf(&sb, "external_files: %s\n", strings.Join(short, ", "))
-			}
-		}
-		if ext.GitCount > 0 {
-			// Just the most recent git event line.
-			c := ext.GitChanges[0]
-			if c.GitMessage != "" {
-				fmt.Fprintf(&sb, "external_git: %s — %s\n", c.ChangeType, c.GitMessage)
-			} else {
-				fmt.Fprintf(&sb, "external_git: %s\n", c.ChangeType)
-			}
-		}
+	if ps.TestFramework != "" {
+		row += " · test=" + ps.TestFramework
 	}
+	fmt.Fprintln(sb, row)
+}
 
-	// Anomalies are loud on purpose — they belong at the bottom of the tag
-	// so the agent reads them last (and most recent in memory).
-	if len(b.Anomalies) > 0 {
-		sb.WriteString("anomalies:\n")
-		for i, a := range b.Anomalies {
-			if i >= 4 { // cap to keep injection size bounded
-				fmt.Fprintf(&sb, "  ... +%d more\n", len(b.Anomalies)-4)
+// renderSessionBlock — session header (id/duration/counters/focus/tools).
+// All counter fields are excluded from the digest so this block only
+// re-emits when Focus changes — see digestFocus.
+func renderSessionBlock(sb *strings.Builder, s *SessionState) {
+	if s == nil {
+		return
+	}
+	fmt.Fprintf(sb, "session: %s\n", abbrev(s.SessionID, 8))
+	if s.DurationMinutes > 0 {
+		fmt.Fprintf(sb, "duration: %d min\n", s.DurationMinutes)
+	}
+	if s.ToolCallCount > 0 {
+		fmt.Fprintf(sb, "tool_calls: %d\n", s.ToolCallCount)
+	}
+	if s.TokensInput+s.TokensOutput > 0 {
+		fmt.Fprintf(sb, "tokens: in=%d out=%d\n", s.TokensInput, s.TokensOutput)
+	}
+	if s.CurrentFocus != "" {
+		fmt.Fprintf(sb, "current_focus: %s\n", shortPath(s.CurrentFocus))
+	}
+	if len(s.RecentTools) > 0 {
+		parts := make([]string, 0, 6)
+		for i, t := range s.RecentTools {
+			if i >= 6 {
 				break
 			}
-			fmt.Fprintf(&sb, "  - [%s] %s — %s\n", strings.ToUpper(a.Severity), a.Kind, a.Suggestion)
+			parts = append(parts, fmt.Sprintf("%s×%d", t.Name, t.Count))
+		}
+		fmt.Fprintf(sb, "tools: %s\n", strings.Join(parts, ", "))
+	}
+	if len(s.RecentFiles) > 0 {
+		short := make([]string, 0, 5)
+		for i, p := range s.RecentFiles {
+			if i >= 5 {
+				break
+			}
+			short = append(short, shortPath(p))
+		}
+		fmt.Fprintf(sb, "recent_files: %s\n", strings.Join(short, ", "))
+	}
+}
+
+// renderBuildBlock — current build status. Surfaces the most recent
+// stderr/error line whenever one exists; agents need the message
+// itself, not "errors=2" counts.
+func renderBuildBlock(sb *strings.Builder, bs *BuildStatus) {
+	if bs == nil {
+		return
+	}
+	switch {
+	case bs.LastExitCode != nil && *bs.LastExitCode != 0:
+		fmt.Fprintf(sb, "build: ❌ %s exit=%d\n", bs.Tag, *bs.LastExitCode)
+	case bs.LastExitCode != nil:
+		fmt.Fprintf(sb, "build: ✅ %s exit=0\n", bs.Tag)
+	case bs.LastEventAt.IsZero():
+		// no recent activity
+	default:
+		fmt.Fprintf(sb, "build: %s (running)\n", bs.Tag)
+	}
+	if bs.ErrorsInLast30Min > 0 {
+		fmt.Fprintf(sb, "build_errors_30m: %d\n", bs.ErrorsInLast30Min)
+	}
+	if last := bs.LastErrorMessage; last != "" {
+		age := relativeAge(bs.LastErrorAt)
+		recovered := !bs.LastErrorAt.IsZero() && bs.LastEventAt.After(bs.LastErrorAt.Add(10*time.Second))
+		tag := age
+		if recovered {
+			tag += ", may have recovered"
+		}
+		fmt.Fprintf(sb, "build_last_error (%s): %s\n", tag, oneLine(last, 200))
+	}
+}
+
+// renderExternalBlock — human-attributed file changes + most recent git
+// event since the bundle's window.
+func renderExternalBlock(sb *strings.Builder, ext *ExternalChanges) {
+	if ext == nil || (ext.HumanCount == 0 && ext.GitCount == 0) {
+		return
+	}
+	if ext.HumanCount > 0 {
+		fmt.Fprintf(sb, "external_human_changes: %d\n", ext.HumanCount)
+		short := make([]string, 0, 3)
+		for i, c := range ext.HumanChanges {
+			if i >= 3 {
+				break
+			}
+			short = append(short, shortPath(c.FilePath))
+		}
+		if len(short) > 0 {
+			fmt.Fprintf(sb, "external_files: %s\n", strings.Join(short, ", "))
 		}
 	}
+	if ext.GitCount > 0 {
+		c := ext.GitChanges[0]
+		if c.GitMessage != "" {
+			fmt.Fprintf(sb, "external_git: %s — %s\n", c.ChangeType, c.GitMessage)
+		} else {
+			fmt.Fprintf(sb, "external_git: %s\n", c.ChangeType)
+		}
+	}
+}
 
-	sb.WriteString("</tma1-context>")
-	return sb.String()
+// renderAnomaliesBlock — bottom of the tag so the agent reads them last
+// (and most recent in memory).
+func renderAnomaliesBlock(sb *strings.Builder, anomalies []Anomaly) {
+	if len(anomalies) == 0 {
+		return
+	}
+	sb.WriteString("anomalies:\n")
+	for i, a := range anomalies {
+		if i >= 4 { // cap to keep injection size bounded
+			fmt.Fprintf(sb, "  ... +%d more\n", len(anomalies)-4)
+			break
+		}
+		fmt.Fprintf(sb, "  - [%s] %s — %s\n", strings.ToUpper(a.Severity), a.Kind, a.Suggestion)
+	}
 }
 
 // RenderJSON returns the bundle as indented JSON, suitable for MCP responses.

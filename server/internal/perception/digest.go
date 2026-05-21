@@ -28,6 +28,48 @@ type Digest struct {
 // injection (the second is noise).
 func (d Digest) Equal(other Digest) bool { return d == other }
 
+// DigestDelta marks which Bundle sections differ between two digests.
+// Drives the incremental injection path: rather than re-emitting the
+// whole bundle every turn (full text → token spend), only sections
+// whose content actually changed are rendered. Plan §Phase 0.1: "摘要 ≤
+// 500 tokens, 增量优先（只列上 turn 之后变化）".
+type DigestDelta struct {
+	Anomalies bool
+	Build     bool
+	External  bool
+	Project   bool
+	Focus     bool
+}
+
+// Empty returns true when no section differs. Callers should suppress
+// injection entirely on an empty delta — nothing actionable changed.
+func (d DigestDelta) Empty() bool {
+	return !d.Anomalies && !d.Build && !d.External && !d.Project && !d.Focus
+}
+
+// AllSectionsDelta returns a delta with every section flagged. Used on
+// first emit for a session and when callers want a forced full render.
+func AllSectionsDelta() DigestDelta {
+	return DigestDelta{
+		Anomalies: true,
+		Build:     true,
+		External:  true,
+		Project:   true,
+		Focus:     true,
+	}
+}
+
+// DiffFrom returns the delta from prev → d.
+func (d Digest) DiffFrom(prev Digest) DigestDelta {
+	return DigestDelta{
+		Anomalies: d.Anomalies != prev.Anomalies,
+		Build:     d.Build != prev.Build,
+		External:  d.External != prev.External,
+		Project:   d.Project != prev.Project,
+		Focus:     d.Focus != prev.Focus,
+	}
+}
+
 // Digest produces a stable fingerprint of bundle b. Identical for two
 // bundles that differ only in counters that always change (turn duration,
 // tokens, tool call counts).

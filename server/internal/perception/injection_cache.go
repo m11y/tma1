@@ -37,34 +37,55 @@ func NewInjectionCache(ttl time.Duration) *InjectionCache {
 }
 
 // IfChanged returns true iff the new digest differs from what was last
-// stored for sessionID. The cache is updated to `d` whenever this returns
-// true (so the next call sees the new baseline).
+// stored for sessionID. Kept for callers that only need a binary
+// changed/unchanged answer (PreCompact / SessionStart that seed the
+// cache without consuming the delta).
 //
-// First call for a session always returns true (no previous baseline).
-// Forced bypass: pass sessionID="" and the call always returns true
-// without touching the cache.
+// Equivalent to `!c.Diff(sessionID, d).Empty()`. See Diff for the cache
+// update semantics.
 func (c *InjectionCache) IfChanged(sessionID string, d Digest) bool {
+	return !c.Diff(sessionID, d).Empty()
+}
+
+// Diff returns which Bundle sections changed since the last cached
+// digest for sessionID. First call for a session returns
+// AllSectionsDelta (no prior baseline → render everything). When the
+// new digest matches the cached one, returns an empty delta and
+// callers should suppress emit.
+//
+// In all cases the cache is updated: on a change, the new digest
+// replaces the old one; on no-change, the existing entry's expiry is
+// refreshed so a stable-but-active session doesn't fall out.
+//
+// Forced bypass: pass sessionID="" and the call always returns
+// AllSectionsDelta without touching the cache.
+func (c *InjectionCache) Diff(sessionID string, d Digest) DigestDelta {
 	if sessionID == "" {
-		return true
+		return AllSectionsDelta()
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	prev, ok := c.items[sessionID]
 	now := time.Now()
+	prev, ok := c.items[sessionID]
 	if ok && now.After(prev.expires) {
 		delete(c.items, sessionID)
 		ok = false
 	}
-	if ok && prev.digest.Equal(d) {
-		// Bump expiry so a stable-but-active session doesn't fall out.
-		c.items[sessionID] = injectionCacheEntry{digest: prev.digest, expires: now.Add(c.ttl)}
-		return false
+	if !ok {
+		c.items[sessionID] = injectionCacheEntry{digest: d, expires: now.Add(c.ttl)}
+		c.opportunisticGC(now)
+		return AllSectionsDelta()
 	}
 
+	delta := d.DiffFrom(prev.digest)
+	if delta.Empty() {
+		// Refresh expiry, keep the existing baseline.
+		c.items[sessionID] = injectionCacheEntry{digest: prev.digest, expires: now.Add(c.ttl)}
+		return delta
+	}
 	c.items[sessionID] = injectionCacheEntry{digest: d, expires: now.Add(c.ttl)}
-	c.opportunisticGC(now)
-	return true
+	return delta
 }
 
 // Forget clears the cached entry for sessionID — useful when a session is
