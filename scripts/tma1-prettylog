@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# tma1-prettylog -- colourise slog JSON output for terminal-friendly reading.
+#
+# Reads stdin line-by-line. Lines that parse as a JSON object with "msg"
+# get rewritten into a single coloured line: dim timestamp + tagged
+# level + bold message + cyan-key=value attrs. Anything that doesn't
+# parse as JSON (compiler errors, make output, plain `echo` lines)
+# passes through unchanged so colours emitted by other tools survive.
+#
+# Designed for the make dev workflow, where the inner tma1-server logs
+# JSON. Safe to keep in the pipeline at all times -- non-JSON input is
+# preserved verbatim.
+#
+# Requires jq.
+
+set -uo pipefail
+
+if ! command -v jq >/dev/null 2>&1; then
+  # No jq -- become a no-op pass-through so the pipeline keeps working.
+  exec cat
+fi
+
+exec jq -R -r --unbuffered '
+  . as $orig
+  | (try fromjson catch null) as $obj
+  | if ($obj // null) != null
+       and ($obj | type) == "object"
+       and ($obj.msg // false) != false
+    then
+      ($obj.time  // "") as $ts
+      | ($obj.level // "INFO") as $lvl
+      | ( if   $lvl == "ERROR" then "[31mERR[0m"
+          elif $lvl == "WARN"  then "[33mWARN[0m"
+          elif $lvl == "DEBUG" then "[34mDBG[0m"
+          else                      "[32mINFO[0m"
+          end
+        ) as $clvl
+      | ( $obj
+          | to_entries
+          | map(select(.key | IN("time","level","msg") | not))
+          | map("[36m\(.key)[0m=\(.value | tostring)")
+          | join(" ")
+        ) as $attrs
+      | "[2m\($ts)[0m \($clvl) [1m\($obj.msg)[0m"
+        + (if $attrs == "" then "" else " " + $attrs end)
+    else
+      $orig
+    end
+'

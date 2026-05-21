@@ -79,9 +79,12 @@ run: build
 
 dev: build
 	@echo "Starting dev mode (watching server/ for changes)..."
+	@if ! command -v jq >/dev/null 2>&1; then \
+		echo "  (jq not found -- output stays JSON; brew install jq for colourised logs)"; \
+	fi
 	@trap 'kill $$PID 2>/dev/null; exit 0' INT TERM; \
 	while true; do \
-		./server/bin/tma1-server & PID=$$!; \
+		(./server/bin/tma1-server 2>&1 | $(MAKEFILE_DIR)/scripts/tma1-prettylog) & PID=$$!; \
 		fswatch -1 -r --exclude='/bin/' --include='\.go$$' --include='\.html$$' --include='\.css$$' --include='\.js$$' --include='\.sql$$' --exclude='.*' $(MAKEFILE_DIR)/server; \
 		echo "Change detected, rebuilding..."; \
 		kill $$PID 2>/dev/null; wait $$PID 2>/dev/null; \
