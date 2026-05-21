@@ -142,6 +142,14 @@ func main() {
 		logger.Warn("anomaly_emits table creation failed", "err", err)
 	}
 
+	// Step 3.4.2: apply versioned ALTER TABLE migrations. Replaces the
+	// pre-ledger inline error-tolerant approach (Plan §真实风险点:
+	// "复用现有 settings/configVersion 迁移机制"). Runs after all
+	// CREATE TABLE init so migrations can target any tma1_* table.
+	if err := greptimedb.RunSchemaMigrations(cfg.GreptimeDBHTTPPort, logger); err != nil {
+		logger.Warn("schema migrations failed; subsequent inserts may fail on missing columns", "err", err)
+	}
+
 	// Step 3.5: check for tma1-server upgrade.
 	// No version file (old == "") covers both fresh install and old-version upgrade;
 	// we cannot distinguish the two, so we always attempt truncate+reseed.

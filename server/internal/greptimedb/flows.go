@@ -93,28 +93,11 @@ var sessionTableDDLs = []string{
 ) WITH ('append_mode'='true')`,
 }
 
-// sessionTableUpgrades are ALTER TABLE statements for adding columns to existing tables.
-// GreptimeDB returns an error if the column already exists, which we silently ignore.
-//
-// Phase 1.4 additions: derived fields extracted from tool_input/tool_response
-// at ingest time so anomaly rules + perception queries can WHERE on them
-// directly instead of doing regex/JSON parsing in SQL. The raw tool_input
-// stays as a fallback for rows written before this upgrade.
-var sessionTableUpgrades = []string{
-	`ALTER TABLE tma1_hook_events ADD COLUMN conversation_id STRING NULL`,
-	`ALTER TABLE tma1_hook_events ADD COLUMN permission_mode STRING NULL`,
-	`ALTER TABLE tma1_hook_events ADD COLUMN metadata STRING NULL`,
-	`ALTER TABLE tma1_hook_events ADD COLUMN tool_file_path STRING NULL`,
-	`ALTER TABLE tma1_hook_events ADD COLUMN tool_command_prefix STRING NULL`,
-	`ALTER TABLE tma1_hook_events ADD COLUMN tool_success BOOLEAN NULL`,
-	`ALTER TABLE tma1_hook_events ADD COLUMN tool_error_summary STRING NULL`,
-	`ALTER TABLE tma1_messages ADD COLUMN input_tokens BIGINT NULL`,
-	`ALTER TABLE tma1_messages ADD COLUMN output_tokens BIGINT NULL`,
-	`ALTER TABLE tma1_messages ADD COLUMN cache_read_tokens BIGINT NULL`,
-	`ALTER TABLE tma1_messages ADD COLUMN cache_creation_tokens BIGINT NULL`,
-	`ALTER TABLE tma1_messages ADD COLUMN duration_ms BIGINT NULL`,
-}
-
+// isIgnorableSchemaUpgradeError matches the GreptimeDB error surface for
+// ALTER TABLE statements that target already-present columns. The
+// schema_migrations IgnoreErr field wraps this so a DB that already
+// has the v1/v2 columns (from the pre-ledger inline-tolerant ALTER
+// path) can adopt the ledger without re-creating the table.
 func isIgnorableSchemaUpgradeError(err error) bool {
 	if err == nil {
 		return false
@@ -125,17 +108,15 @@ func isIgnorableSchemaUpgradeError(err error) bool {
 
 // InitSessionTables creates the session tables.
 // Uses append-only mode with proper indexes for optimal performance.
+//
+// ALTER TABLE upgrades live in schema_migrations.go (RunSchemaMigrations) —
+// keep this function focused on initial CREATE TABLE so the two paths
+// can be reasoned about (and tested) independently.
 func InitSessionTables(httpPort int, logger *slog.Logger) error {
 	sqlURL := fmt.Sprintf("http://localhost:%d/v1/sql", httpPort)
 	for _, ddl := range sessionTableDDLs {
 		if err := execSQL(sqlURL, ddl); err != nil {
 			return fmt.Errorf("init session tables: %w", err)
-		}
-	}
-	// Upgrade existing tables: ignore only duplicate-column errors.
-	for _, alter := range sessionTableUpgrades {
-		if err := execSQL(sqlURL, alter); err != nil && !isIgnorableSchemaUpgradeError(err) {
-			return fmt.Errorf("upgrade session tables: %w", err)
 		}
 	}
 	logger.Info("session tables initialized")
