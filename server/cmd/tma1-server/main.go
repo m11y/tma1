@@ -305,6 +305,8 @@ func main() {
 //	--filter-invert         invert the regex match (capture non-matching lines)
 //	--tag NAME              override the short identifier (default: command name)
 //	--project DIR           project label override (default: ResolveProjectRoot(cwd) basename)
+//	--no-color              don't inject FORCE_COLOR / CLICOLOR_FORCE etc.
+//	                        (default: inject so wrapped tools keep ANSI output)
 func runBuild(args []string) (int, error) {
 	cfg, err := config.Load()
 	if err != nil {
@@ -319,6 +321,7 @@ func runBuild(args []string) (int, error) {
 		filterInvert  bool
 		tag           string
 		projectOverride string
+		noColor       bool // default false => ForceColor enabled
 	)
 
 	i := 0
@@ -354,12 +357,15 @@ func runBuild(args []string) (int, error) {
 			}
 			projectOverride = args[i+1]
 			i += 2
+		case "--no-color":
+			noColor = true
+			i++
 		case "--":
 			i++
 			goto runCmd
 		case "-h", "--help":
 			fmt.Println("usage: tma1-server build [flags] -- <command> [args...]")
-			fmt.Println("flags: --watch --debounce 2s --filter-regex PAT --filter-invert --tag NAME --project DIR")
+			fmt.Println("flags: --watch --debounce 2s --filter-regex PAT --filter-invert --tag NAME --project DIR --no-color")
 			return 0, nil
 		default:
 			// Treat the first non-flag positional as the start of the command.
@@ -400,10 +406,11 @@ runCmd:
 
 	store := build.NewGreptimeStore(cfg.GreptimeDBHTTPPort)
 	bcfg := build.Config{
-		Project: project,
-		Command: strings.Join(cmdArgs, " "),
-		Tag:     tag,
-		Filter:  filter,
+		Project:    project,
+		Command:    strings.Join(cmdArgs, " "),
+		Tag:        tag,
+		Filter:     filter,
+		ForceColor: !noColor,
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

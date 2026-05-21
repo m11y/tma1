@@ -2,11 +2,50 @@ package build
 
 import (
 	"context"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestApplyForceColorInjectsEnvVars(t *testing.T) {
+	cmd := exec.Command("/bin/echo", "hi")
+	applyForceColor(cmd, true)
+
+	want := map[string]string{
+		"FORCE_COLOR":       "1",
+		"CLICOLOR_FORCE":    "1",
+		"CARGO_TERM_COLOR":  "always",
+		"RUSTC_COLOR":       "always",
+		"PY_COLORS":         "1",
+		"MYPY_FORCE_COLOR":  "1",
+	}
+	got := map[string]string{}
+	for _, kv := range cmd.Env {
+		if idx := strings.Index(kv, "="); idx >= 0 {
+			got[kv[:idx]] = kv[idx+1:]
+		}
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("env %s = %q, want %q", k, got[k], v)
+		}
+	}
+	// Sanity: PATH was inherited from the parent so the child still
+	// resolves /bin/echo etc. when the user runs without a prefix.
+	if got["PATH"] == "" {
+		t.Error("PATH not inherited; child would lose binary resolution")
+	}
+}
+
+func TestApplyForceColorNoOpWhenDisabled(t *testing.T) {
+	cmd := exec.Command("/bin/echo", "hi")
+	applyForceColor(cmd, false)
+	if cmd.Env != nil {
+		t.Errorf("Env should stay nil when force disabled, got %v", cmd.Env)
+	}
+}
 
 // memWriter is an in-memory EventWriter for tests.
 type memWriter struct {

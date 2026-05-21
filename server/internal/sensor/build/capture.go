@@ -71,6 +71,40 @@ type Config struct {
 	Command string // human-readable command line (used as Event.Command)
 	Tag     string // short label (default: first word of Command)
 	Filter  LineFilter
+	// ForceColor injects a small set of "behave as if stdout is a TTY"
+	// env vars into the captured subprocess so cargo / pytest / npm /
+	// vite / ls etc. keep emitting ANSI escapes through our pipe.
+	// Default behaviour at the runBuild flag layer is true; the user
+	// opts out with --no-color when a tool misbehaves under forced
+	// colour (e.g. emits alt-screen sequences into a logfile).
+	ForceColor bool
+}
+
+// colorForcingEnvVars are the env vars commonly understood by CLI
+// tooling to mean "stay coloured even though stdout isn't a TTY".
+// Listed in rough order of how many tools each one covers, so a tool
+// reading the first match still gets the answer it expects.
+//
+// FORCE_COLOR: node / npm / pnpm / jest / vitest / mocha / vite /
+//              prettier / eslint / many "supports-color" downstreams
+// CLICOLOR_FORCE: BSD / macOS coreutils (ls), grep on darwin
+// CARGO_TERM_COLOR: rust cargo and ecosystem
+// RUSTC_COLOR: rustc invoked directly
+// PY_COLORS: pytest
+// MYPY_FORCE_COLOR: mypy
+//
+// We don't try to set everything ever invented; the long-tail tools
+// (rspec etc.) typically take a flag, which the user passes inside
+// their command line anyway.
+func colorForcingEnvVars() []string {
+	return []string{
+		"FORCE_COLOR=1",
+		"CLICOLOR_FORCE=1",
+		"CARGO_TERM_COLOR=always",
+		"RUSTC_COLOR=always",
+		"PY_COLORS=1",
+		"MYPY_FORCE_COLOR=1",
+	}
 }
 
 func (c Config) tag() string {
@@ -104,6 +138,7 @@ func (r *Runner) Run(ctx context.Context, args []string) (*RunResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	applyForceColor(cmd, r.cfg.ForceColor)
 
 	start := time.Now()
 	r.emit(ctx, Event{
@@ -247,6 +282,7 @@ func (r *LongRunner) Run(ctx context.Context, args []string) (*RunResult, error)
 	if err != nil {
 		return nil, err
 	}
+	applyForceColor(cmd, r.cfg.ForceColor)
 
 	start := time.Now()
 	r.emit(ctx, Event{
@@ -412,6 +448,22 @@ func buildCommand(args []string) (*exec.Cmd, error) {
 		cmd.Env = append(os.Environ(), envVars...)
 	}
 	return cmd, nil
+}
+
+// applyForceColor injects the "behave as if stdout is a TTY" env vars
+// when enabled. cmd.Env starts nil (inherits process env from libc);
+// once we touch it we must explicitly seed from os.Environ() or the
+// child loses PATH / HOME / etc. The user's own KEY=VALUE prefix args
+// are layered in earlier by buildCommand -- we append on top so the
+// user's explicit values still win.
+func applyForceColor(cmd *exec.Cmd, force bool) {
+	if !force {
+		return
+	}
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	cmd.Env = append(cmd.Env, colorForcingEnvVars()...)
 }
 
 // waitForExit returns the child's exit code (0 on clean exit, signal/abnormal
