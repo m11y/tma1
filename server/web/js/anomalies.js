@@ -67,7 +67,12 @@ function anom_render() {
 // the session-detail panel already knows which session it's in).
 function anom_renderRow(a, includeSession) {
   var sev = a.severity || 'low';
-  var pill = '<span class="anom-pill sev-' + sev + '">' + sev + '</span>';
+  // Render the localised severity label inside the pill (sessions-detail.js
+  // routes severity counts through the same anom.sev.* keys, so the pill
+  // here stays in sync). The CSS class still drives colour — that part
+  // stays anchored to the canonical English severity name.
+  var sevLabel = t('anom.sev.' + sev) || sev;
+  var pill = '<span class="anom-pill sev-' + sev + '">' + anom_escape(sevLabel) + '</span>';
   var sess = '';
   if (includeSession && a.session_id) {
     var sid = (a.session_id + '').substring(0, 8);

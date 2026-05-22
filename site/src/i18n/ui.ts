@@ -30,14 +30,14 @@ export interface T {
 
 export const en: T = {
   lang: 'en',
-  title: 'TMA1 \u2014 Local-First LLM Agent Observability',
-  description: 'Local observability for your AI agents. Tokens, cost, latency, and conversation replay \u2014 on your machine.',
+  title: 'TMA1 \u2014 Close the Agent Loop, Locally',
+  description: 'Local observability that talks back. TMA1 records every LLM call on your machine, then feeds what it sees into the agent\u2019s next turn via hooks, MCP tools, and anomaly detection.',
   nav: { features: 'Features', how: 'How it works', security: 'Security' },
   hero: {
     hook: 'I needed to know what my agents cost \u2014 and whether they were doing anything dangerous.',
-    h1_1: 'Know what your agent is doing',
-    h1_2: 'and what it costs',
-    subtitle: 'Tokens, cost, latency \u2014 every LLM call, recorded <em>locally</em>. Click a spike to see which conversation is burning money.',
+    h1_1: 'Close the loop around your agent',
+    h1_2: 'with observability that talks back',
+    subtitle: 'TMA1 records every LLM call <em>locally</em>, then routes what it sees back into the agent\u2019s next turn \u2014 hooks, MCP tools, and anomaly detection.',
   },
   onboarding: { label: 'AGENT ONBOARDING', manual: 'Manual install' },
   highlights: [
@@ -98,14 +98,14 @@ export const en: T = {
 
 export const zh: T = {
   lang: 'zh',
-  title: 'TMA1 \u2014 LLM Agent \u672c\u5730\u53ef\u89c2\u6d4b',
-  description: 'AI agent \u672c\u5730\u53ef\u89c2\u6d4b\u3002Token\u3001\u8d39\u7528\u3001\u5ef6\u8fdf\u3001\u5bf9\u8bdd\u56de\u653e\u2014\u2014\u5168\u90e8\u5728\u4f60\u7684\u673a\u5668\u4e0a\u3002',
+  title: 'TMA1 \u2014 \u7ed9 agent \u95ed\u73af\uff08\u672c\u5730\u4f18\u5148\uff09',
+  description: '\u672c\u5730\u53ef\u89c2\u6d4b\uff0c\u8fd8\u80fd\u56de\u704c\u3002TMA1 \u628a agent \u7684\u6bcf\u4e00\u6b21 LLM \u8c03\u7528\u8bb0\u5728\u4f60\u673a\u5668\u4e0a\uff0c\u518d\u901a\u8fc7 hooks\u3001MCP\u3001anomaly \u68c0\u6d4b\u628a\u8fd9\u4e9b\u4fe1\u53f7\u9001\u56de agent \u7684\u4e0b\u4e00\u8f6e\u3002',
   nav: { features: '\u529f\u80fd', how: '\u5de5\u4f5c\u539f\u7406', security: '\u5b89\u5168' },
   hero: {
     hook: '\u6211\u60f3\u77e5\u9053 agent \u5230\u5e95\u82b1\u4e86\u591a\u5c11\u94b1\uff0c\u6709\u6ca1\u6709\u5728\u641e\u5371\u9669\u64cd\u4f5c\u3002',
-    h1_1: '\u4f60\u7684 agent \u5728\u505a\u4ec0\u4e48',
-    h1_2: '\u82b1\u4e86\u591a\u5c11\u94b1',
-    subtitle: 'Token\u3001\u8d39\u7528\u3001\u5ef6\u8fdf\u2014\u2014\u6bcf\u6b21 LLM \u8c03\u7528\uff0c<em>\u672c\u5730</em>\u8bb0\u5f55\u3002\u70b9\u5f00\u4e00\u4e2a\u5c16\u5cf0\uff0c\u770b\u54ea\u4e2a\u5bf9\u8bdd\u5728\u70e7\u94b1\u3002',
+    h1_1: '\u7ed9\u4f60\u7684 agent \u95ed\u73af',
+    h1_2: '\u8ba9\u53ef\u89c2\u6d4b\u80fd\u5f80\u56de\u9001',
+    subtitle: 'TMA1 \u5728<em>\u672c\u5730</em>\u8bb0\u4e0b agent \u6bcf\u4e00\u6b21 LLM \u8c03\u7528\uff0c\u518d\u901a\u8fc7 hooks\u3001MCP\u3001anomaly \u68c0\u6d4b\u628a\u770b\u5230\u7684\u4e1c\u897f\u9001\u56de agent \u7684\u4e0b\u4e00\u8f6e reasoning\u3002',
   },
   onboarding: { label: 'AGENT \u63a5\u5165', manual: '\u624b\u52a8\u5b89\u88c5' },
   highlights: [
@@ -166,14 +166,14 @@ export const zh: T = {
 
 export const es: T = {
   lang: 'es',
-  title: 'TMA1 \u2014 Observabilidad Local para Agentes LLM',
-  description: 'Observabilidad local para tus agentes de IA. Tokens, costos, latencia y replay de conversaciones \u2014 en tu m\u00e1quina.',
+  title: 'TMA1 \u2014 Cerr\u00e1 el loop del agente, en local',
+  description: 'Observabilidad local que le responde al agente. TMA1 graba cada llamada LLM en tu m\u00e1quina y reinyecta lo que ve en el pr\u00f3ximo turno del agente v\u00eda hooks, herramientas MCP y detecci\u00f3n de anomal\u00edas.',
   nav: { features: 'Funcionalidades', how: 'C\u00f3mo funciona', security: 'Seguridad' },
   hero: {
     hook: 'Necesitaba saber cu\u00e1nto cuestan mis agentes \u2014 y si estaban haciendo algo peligroso.',
-    h1_1: 'Sab\u00e9 qu\u00e9 hace tu agente',
-    h1_2: 'y cu\u00e1nto te cuesta',
-    subtitle: 'Tokens, costo, latencia \u2014 cada llamada LLM, registrada <em>localmente</em>. Hac\u00e9 clic en un pico para ver qu\u00e9 conversaci\u00f3n est\u00e1 quemando plata.',
+    h1_1: 'Cerr\u00e1 el loop alrededor de tu agente',
+    h1_2: 'con observabilidad que le responde',
+    subtitle: 'TMA1 graba cada llamada LLM <em>localmente</em>, despu\u00e9s reinyecta lo que ve en el pr\u00f3ximo turno del agente \u2014 hooks, MCP y detecci\u00f3n de anomal\u00edas.',
   },
   onboarding: { label: 'ONBOARDING DEL AGENTE', manual: 'Instalaci\u00f3n manual' },
   highlights: [

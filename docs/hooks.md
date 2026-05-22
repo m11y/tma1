@@ -21,7 +21,12 @@ becomes the injection content.
 `~/.tma1/hooks/tma1-hook.sh` (or `.ps1` on Windows). The script:
 
 1. Reads the event JSON from stdin.
-2. POSTs it to `127.0.0.1:14318/api/hooks` with `curl -m 0.5`.
+2. POSTs it to `127.0.0.1:14318/api/hooks`.
+   - **Unix**: `curl -sf -m 0.5` — 500 ms hard cap.
+   - **Windows**: `Invoke-WebRequest -TimeoutSec 1` — 1 s cap.
+     PowerShell's `-TimeoutSec` only accepts whole seconds, so we
+     trade ~500 ms of latency on Windows for keeping the script
+     dependency-free (no .NET HttpClient wrapper).
 3. Writes the response body to stdout.
 
 On any error — server unreachable, timeout, non-200, etc. — stdout is
@@ -30,8 +35,10 @@ TMA1 means no injection, not a stuck CC.
 
 The server side mirrors that contract: `handleHooks` writes to
 GreptimeDB asynchronously (fire-and-forget goroutine) and synchronously
-returns the injection body. If the synchronous half is slow, the curl
-timeout fires and the agent runs without injection.
+returns the injection body, capped by `hookInjectionTimeout = 300 ms`
+inside `generateInjection`. Both client timeouts above sit above that
+cap, so a slow path falls back to "no injection" rather than blocking
+the agent.
 
 ## Registration
 

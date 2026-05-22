@@ -25,6 +25,264 @@ Check which tables exist:
 - `openclaw_tokens_total` → OpenClaw metrics
 - `tma1_hook_events` → session events from Claude Code hooks + Codex / Copilot CLI / OpenClaw JSONL parsers (filter via `agent_source`)
 - `tma1_messages` → conversation content for all agents (session_id prefixes: `cp:` Copilot CLI, `oc:` OpenClaw; Claude Code and Codex use raw session IDs)
+- `tma1_anomaly_emits` → ground-truth log of which anomalies were emitted to which agent session, used by the dashboard's Anomalies tab and the Phase 1.7 validation gates
+- `tma1_build_events` → output of `tma1-server build -- <cmd>` (one-shot or `--watch`): stdout / stderr / completion events with exit code, duration, and last error
+- `tma1_external_changes` → file system + git activity captured by the git/file sensor (agent vs human attribution)
+- `tma1_project_state` → most recent indexed snapshot of each project's structure (language, build / test system, key files, top-level directories)
+
+---
+
+### tma1_hook_events
+
+Per-event log of every Claude Code hook + Codex / Copilot CLI / OpenClaw
+JSONL-derived event. 21 columns on a current install (15 from the
+base DDL, 2 added by schema migration v1, 4 by v2). `append_mode`.
+
+| Column | Type | Role |
+| --- | --- | --- |
+| `ts` | TIMESTAMP | TIME INDEX |
+| `session_id` | STRING | SKIPPING INDEX |
+| `event_type` | STRING | INVERTED INDEX |
+| `agent_source` | STRING | INVERTED INDEX (values: `claude_code`, `codex`, `copilot_cli`, `openclaw`) |
+| `tool_name` | STRING NULL | raw |
+| `tool_input` | STRING NULL | raw JSON, truncated at ~2 KB |
+| `tool_result` | STRING NULL | raw, truncated at ~4 KB |
+| `tool_use_id`, `agent_id`, `agent_type`, `notification_type` | STRING NULL | raw |
+| `"message"` | STRING NULL | quoted — reserved keyword |
+| `cwd`, `transcript_path`, `conversation_id` | STRING NULL | raw |
+| `permission_mode`, `metadata` | STRING NULL | added by migration v1; `metadata` is a JSON blob for event-specific fields |
+| `tool_file_path`, `tool_command_prefix`, `tool_error_summary` | STRING NULL | added by v2 — lifted at ingest from `tool_input` / `tool_result` so anomaly rules can WHERE without re-parsing JSON |
+| `tool_success` | BOOLEAN NULL | added by v2 — TRUE/FALSE for PostToolUse / PostToolUseFailure, NULL otherwise |
+
+Most recent 20 events in a session:
+
+```sql
+SELECT ts, event_type, tool_name, tool_file_path, tool_command_prefix, tool_success
+FROM tma1_hook_events
+WHERE session_id = '<sid>'
+ORDER BY ts DESC LIMIT 20
+```
+
+---
+
+### tma1_messages
+
+Conversation content (user / assistant / thinking) for every agent.
+13 columns (8 base + 5 added by migration v1). `append_mode`.
+FULLTEXT INDEX on `content` enables `matches_term()` keyword search.
+
+| Column | Type | Role |
+| --- | --- | --- |
+| `ts` | TIMESTAMP | TIME INDEX |
+| `session_id` | STRING | SKIPPING INDEX |
+| `message_type` | STRING | INVERTED INDEX |
+| `"role"` | STRING | INVERTED INDEX — quoted, reserved keyword (`user` / `assistant` / `thinking` / `tool_use` / `tool_result`) |
+| `content` | STRING NULL | FULLTEXT INDEX, bloom backend, English analyzer |
+| `model` | STRING NULL | INVERTED INDEX |
+| `tool_name`, `tool_use_id` | STRING NULL | links to a `tool_use` / `tool_result` pair |
+| `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens` | BIGINT NULL | added by migration v1 |
+| `duration_ms` | BIGINT NULL | added by migration v1 |
+
+Token totals per session:
+
+```sql
+SELECT SUM(input_tokens)  AS in_tok,
+       SUM(output_tokens) AS out_tok,
+       SUM(cache_read_tokens) AS cache_read,
+       SUM(cache_creation_tokens) AS cache_create
+FROM tma1_messages
+WHERE session_id = '<sid>'
+```
+
+---
+
+### tma1_anomaly_emits
+
+One row per anomaly the Detector emitted to an injection channel.
+The dashboard's Anomalies tab and the `/api/anomalies/{budget,follow-rate}`
+endpoints read this table — the Detector itself is in-process only.
+9 columns, `append_mode`.
+
+| Column | Type | Role |
+| --- | --- | --- |
+| `ts` | TIMESTAMP | TIME INDEX |
+| `session_id` | STRING | SKIPPING INDEX |
+| `kind` | STRING | INVERTED INDEX (values listed in SKILL.md "Anomaly rules" table) |
+| `severity` | STRING | INVERTED INDEX (`low` / `medium` / `high`) |
+| `"channel"` | STRING NULL | quoted — reserved keyword (`user_prompt_submit` / `stop_block` / `post_tool_use`) |
+| `evidence` | STRING NULL | human-readable summary of why the rule fired |
+| `suggestion` | STRING NULL | concrete next action |
+| `related_files` | STRING NULL | JSON-encoded array of file paths |
+| `first_emitted_at` | TIMESTAMP NULL | when the rule first fired in this session — stable across re-detections within the 10-min suppression window |
+
+Recent HIGH-severity anomalies for a session:
+
+```sql
+SELECT ts, kind, evidence, suggestion, related_files
+FROM tma1_anomaly_emits
+WHERE session_id = '<sid>' AND severity = 'high'
+ORDER BY ts DESC LIMIT 20
+```
+
+---
+
+### tma1_build_events
+
+Captured stdout / stderr / completion events from
+`tma1-server build [--watch] -- <cmd>`. 13 columns, `append_mode`.
+FULLTEXT INDEX on `"message"` enables keyword search on build output.
+
+| Column | Type | Role |
+| --- | --- | --- |
+| `ts` | TIMESTAMP | TIME INDEX |
+| `project` | STRING | SKIPPING INDEX (basename of project root) |
+| `command` | STRING NULL | full command line |
+| `event_type` | STRING | INVERTED INDEX (`started` / `output` / `completed`) |
+| `severity` | STRING NULL | INVERTED INDEX (`info` / `warning` / `error`) |
+| `"stream"` | STRING NULL | quoted — `stdout` / `stderr` / `exit` |
+| `"message"` | STRING NULL | quoted — FULLTEXT INDEX, bloom backend, English analyzer; line batch (~50 lines per output row) |
+| `file_path` | STRING NULL | populated when the line carries a path |
+| `line_no` | INT NULL | populated when the line carries a line number |
+| `exit_code` | INT NULL | non-NULL only on `completed` events |
+| `duration_ms` | BIGINT NULL | non-NULL only on `completed` events |
+| `host` | STRING NULL | hostname |
+| `"tag"` | STRING NULL | quoted — short label (default: first word of the command) |
+
+Latest completion + last error line per project:
+
+```sql
+SELECT project, "tag", exit_code, duration_ms, ts
+FROM tma1_build_events
+WHERE event_type = 'completed'
+  AND ts > now() - INTERVAL '30 minutes'
+ORDER BY ts DESC LIMIT 10
+```
+
+---
+
+### tma1_external_changes
+
+File system + git activity outside the agent. 8 columns, `append_mode`.
+
+| Column | Type | Role |
+| --- | --- | --- |
+| `ts` | TIMESTAMP | TIME INDEX |
+| `project` | STRING | SKIPPING INDEX |
+| `change_type` | STRING | INVERTED INDEX (`file_modified`, `file_added`, `file_deleted`, `git_commit`, `git_branch_switch`) |
+| `file_path` | STRING NULL | populated for file-system events |
+| `git_sha`, `git_message` | STRING NULL | populated for `git_*` events |
+| `attribution` | STRING NULL | INVERTED INDEX (`agent` / `human` / `unknown`) — derived by HookAttributor: agent if a Pre/PostToolUse Edit/Write/MultiEdit/Bash event within ±5 s mentions the same path; otherwise human |
+| `host` | STRING NULL | hostname |
+
+Files a human modified in the last 30 min:
+
+```sql
+SELECT ts, file_path FROM tma1_external_changes
+WHERE project = '<project>'
+  AND attribution = 'human'
+  AND change_type IN ('file_modified','file_added')
+  AND ts > now() - INTERVAL '30 minutes'
+ORDER BY ts DESC
+```
+
+---
+
+### tma1_project_state
+
+Most recent indexed snapshot of each project's static structure.
+One logical row per project, written on first hook event for a
+project (and lazily refreshed every 24 h thereafter). 9 columns,
+`append_mode` — query the latest row by ORDER BY ts DESC LIMIT 1.
+
+| Column | Type | Role |
+| --- | --- | --- |
+| `ts` | TIMESTAMP | TIME INDEX |
+| `project` | STRING | SKIPPING INDEX |
+| `"root"` | STRING NULL | quoted — reserved keyword; absolute path to project root |
+| `"language"` | STRING NULL | INVERTED INDEX — quoted, reserved keyword; primary language guess (`go`, `rust`, `python`, `javascript`, `typescript`, `java`, `php`, `ruby`, `elixir`, …) |
+| `build_system` | STRING NULL | `go` / `cargo` / `npm` / `pnpm` / `yarn` / `bun` / `make` / `maven` / `gradle` / etc. |
+| `test_framework` | STRING NULL | `go test` / `cargo test` / `pytest` / `jest` / `vitest` / `mocha` / `phpunit` / `rspec` / `junit` / `exunit` |
+| `frameworks` | STRING NULL | JSON array of additional languages or frameworks detected |
+| `key_files` | STRING NULL | JSON array (`README.md`, `CLAUDE.md`, `AGENTS.md`, `LICENSE`, `Makefile`, …) |
+| `module_summary` | STRING NULL | JSON object; currently `{ "top_level_dirs": [...] }` capped to 24 entries |
+
+Latest snapshot for a project:
+
+```sql
+SELECT ts, "root", "language", build_system, test_framework, key_files
+FROM tma1_project_state
+WHERE project = '<project>'
+ORDER BY ts DESC LIMIT 1
+```
+
+(`tma1_schema_version` exists as an internal migration ledger, but
+isn't useful for agent queries — leave it alone.)
+
+---
+
+### Sample v2 queries (cross-table)
+
+**Most recent anomalies for the current session, with their suggestion:**
+
+```sql
+SELECT ts, kind, severity, "channel", suggestion, related_files
+FROM tma1_anomaly_emits
+WHERE session_id = '<sid>'
+ORDER BY ts DESC LIMIT 20
+```
+
+**Build status per project in the last hour:**
+
+```sql
+SELECT b.project,
+       MAX(b.ts)            AS last_event_at,
+       MAX(b.exit_code)     AS last_exit_code,
+       MAX(b."message")     AS last_message
+FROM tma1_build_events b
+WHERE b.ts > now() - INTERVAL '1 hour'
+GROUP BY b.project
+ORDER BY last_event_at DESC
+```
+
+**Files a human modified during the active session
+(joins `tma1_hook_events` to find the session window, then
+`tma1_external_changes` for human edits in that window):**
+
+```sql
+WITH win AS (
+  SELECT MIN(ts) AS started_ms, MAX(ts) AS ended_ms, MAX(cwd) AS cwd
+  FROM tma1_hook_events WHERE session_id = '<sid>'
+)
+SELECT ec.ts, ec.file_path
+FROM tma1_external_changes ec, win
+WHERE ec.attribution = 'human'
+  AND ec.change_type IN ('file_modified','file_added')
+  AND ec.ts BETWEEN win.started_ms AND win.ended_ms
+ORDER BY ec.ts DESC
+```
+
+**Action follow-rate (did the agent run a Read on a related file
+within 5 tool calls after an anomaly emit?):**
+
+```sql
+SELECT a.kind,
+       COUNT(*) AS emits,
+       SUM(
+         CASE WHEN EXISTS (
+           SELECT 1
+           FROM tma1_hook_events h
+           WHERE h.session_id  = a.session_id
+             AND h.event_type  = 'PreToolUse'
+             AND h.tool_name   = 'Read'
+             AND h.ts > a.ts
+             AND h.ts < a.ts + INTERVAL '10 minutes'
+             AND a.related_files LIKE '%' || h.tool_file_path || '%'
+         ) THEN 1 ELSE 0 END
+       ) AS followed
+FROM tma1_anomaly_emits a
+WHERE a.ts > now() - INTERVAL '7 days'
+GROUP BY a.kind
+```
 
 ---
 

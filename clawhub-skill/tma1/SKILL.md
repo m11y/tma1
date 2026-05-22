@@ -1,8 +1,11 @@
 ---
 name: tma1
-version: 0.2.0
+version: 0.3.0
 description: |
-  Local-first LLM agent observability.
+  Local-first LLM agent observability that closes the loop:
+  records every LLM call on the user's machine, then feeds what
+  it sees back into the agent's next turn via hooks, MCP tools,
+  and anomaly detection.
 
   Use when users say:
   - "install tma1"
@@ -20,6 +23,15 @@ description: |
   - "what is my agent executing"
   - "agent security audit"
   - "prompt injection risk"
+  - "close the agent loop"
+  - "inject session context"
+  - "call tma1 MCP tools"
+  - "list anomalies"
+  - "show me detected anomalies"
+  - "what did Codex / OpenClaw / Copilot do on this project"
+  - "/tma1-peer"
+  - "block stop on anomalies"
+  - "what's the build status"
 
 keywords:
   - tma1
@@ -29,6 +41,12 @@ keywords:
   - agent monitoring
   - local telemetry
   - otel
+  - agent-loop
+  - hooks
+  - mcp
+  - mcp-server
+  - anomalies
+  - peer-agent
 metadata:
   openclaw:
     emoji: "🪨"
@@ -94,6 +112,82 @@ Dashboard: **http://localhost:14318**
 
 ---
 
+## Agent loop (v2)
+
+Beyond passive recording, TMA1 v2 routes what it sees back into Claude
+Code's reasoning. Three channels:
+
+**Hooks** — all 27 Claude Code hook events are registered for
+telemetry (see Onboarding Step 5). Five of those events also pull
+injection content from the server, prepended to the agent's next
+prompt or used as a Stop block:
+
+| Event | What gets injected |
+| --- | --- |
+| `UserPromptSubmit` | Per-turn `<tma1-context>` digest — session focus, tokens, recent files, active anomalies (delta-only after the first turn) |
+| `PostToolUse` | Per-tool anomaly notes when a rule explicitly routes to this channel |
+| `SessionStart` | Project orientation + prior-session carry-forward |
+| `PreCompact` | Session digest folded into the compaction summary so it survives context loss |
+| `Stop` | JSON block decision when unresolved HIGH-severity anomalies exist; CC refuses to terminate |
+
+**MCP stdio tools** — `tma1-server mcp-serve` is registered in
+`~/.claude.json` so the agent can pull state on demand:
+
+| Tool | When to call | Returns |
+| --- | --- | --- |
+| `get_context_bundle` | Top of a turn, or after compaction | Full perception bundle (session + anomalies + build + external + project) |
+| `get_session_state` | Recovering action history | Tool calls, tokens, current focus, recent files |
+| `get_anomalies` | Before changing approach | Active anomalies, post-suppression |
+| `get_build_status` | After suggesting edits | Last exit, errors in last 30 min, latest stderr line |
+| `get_external_changes` | After a long break | Human-attributed file edits + git activity |
+| `get_project_state` | First time in an unfamiliar repo | Language / build / test / key files / top-level dirs |
+| `get_peer_sessions` | User asks "what did Codex / OpenClaw / Copilot just do" or invokes `/tma1-peer` | Recent peer-agent sessions on the same project |
+
+**Anomaly rules** — six rules detect agent-loop pathologies; each
+routes to a specific channel so the same finding never injects twice:
+
+| Kind | Trigger | Channel |
+| --- | --- | --- |
+| `stale_file_view` | Agent edits a file a human modified externally after the agent's last Read | `user_prompt_submit` |
+| `build_broken_after_my_edit` | Build/test failure naming a just-edited file | `stop_block` when ≥3 failures, else `user_prompt_submit` |
+| `repeated_failed_build` | Same Bash prefix failed 3+ times in 30 min | `stop_block` |
+| `test_stuck` | Same test-runner prefix failed 3+ times (go test / cargo test / pytest / jest / mocha / rspec / phpunit / mix test) | `user_prompt_submit` |
+| `human_modified_during_session` | Human-attributed changes during the active session | `user_prompt_submit` |
+| `context_pressure` | Session input tokens cross threshold (default 100k; override via `TMA1_CONTEXT_PRESSURE_THRESHOLD`) | `user_prompt_submit` |
+
+Per-session 10-minute suppression dedupes repeat emits. Resolution
+checks auto-clear an anomaly when the agent visibly addresses it
+(re-reads a stale file, ships a passing Bash command), so a fix in
+turn N stops the warning in turn N+1.
+
+**`/tma1-peer` slash command** — in Claude Code:
+
+- `/tma1-peer codex` — pull Codex's most recent session on this
+  project into Claude's context.
+- `/tma1-peer copilot 2` — last 2 Copilot CLI sessions.
+- `/tma1-peer` alone — latest session per peer agent.
+
+No copy-paste between terminals. The command is installed as a
+native slash command at `~/.claude/commands/tma1-peer.md` plus a
+fallback skill at `~/.claude/skills/tma1-peer/SKILL.md`.
+
+**One-shot wiring**:
+
+```
+curl -fsSL https://tma1.ai/install.sh | TMA1_ADAPTER=claude-code bash
+```
+
+This calls `tma1-server install --adapter claude-code` after the
+service is up, which idempotently writes hook entries to
+`~/.claude/settings.json`, the MCP server entry to `~/.claude.json`,
+drops the `/tma1-peer` command + skill, and appends a
+`<!-- tma1:start -->` block to the project's `CLAUDE.md` /
+`AGENTS.md`. Re-running only updates what's stale.
+
+Preview the diff before writing: `tma1-server install --dry-run`.
+
+---
+
 ## Definition of Done
 
 This task is NOT complete until all of the following are true:
@@ -148,6 +242,25 @@ If a clean reinstall is needed (wipes all data, config, and logs):
 ```bash
 curl -fsSL https://tma1.ai/install.sh | TMA1_FORCE=1 bash
 ```
+
+For Claude Code users who also want the **agent loop** wired up
+(hooks + MCP server + `/tma1-peer` skill) in a single shot, pass
+the adapter:
+
+```bash
+curl -fsSL https://tma1.ai/install.sh | TMA1_ADAPTER=claude-code bash
+```
+
+The installer calls `tma1-server install --adapter claude-code`
+after the service is healthy. This writes hook entries to
+`~/.claude/settings.json`, registers the MCP server in
+`~/.claude.json`, drops `/tma1-peer` into `~/.claude/commands/`
+and `~/.claude/skills/`, and adds a `<!-- tma1:start -->` block to
+the project's `CLAUDE.md` / `AGENTS.md`. Idempotent — repeat runs
+only update what's stale. When this path runs, the manual hook
+edits in Step 5 are no longer necessary; verification still applies.
+
+Preview before writing: `tma1-server install --dry-run`.
 
 Wait ~15 seconds for the database to start, then verify:
 

@@ -1282,11 +1282,11 @@
       </div>
       <div class="card">
         <div class="label" data-i18n="anom.card.high">HIGH</div>
-        <div class="value" id="anom-val-high" style="color:#e11d48">&mdash;</div>
+        <div class="value" id="anom-val-high" style="color:var(--red)">&mdash;</div>
       </div>
       <div class="card">
         <div class="label" data-i18n="anom.card.medium">MEDIUM</div>
-        <div class="value" id="anom-val-medium" style="color:#f59e0b">&mdash;</div>
+        <div class="value" id="anom-val-medium" style="color:var(--orange)">&mdash;</div>
       </div>
       <div class="card">
         <div class="label" data-i18n="anom.card.sessions_affected">Sessions affected</div>
@@ -1302,7 +1302,7 @@
           <option value="low" data-i18n="anom.filter.low_only">LOW only</option>
         </select>
         <button class="filter-btn" onclick="anom_load()" data-i18n="anom.refresh">Refresh</button>
-        <label style="margin-left:auto;font-size:0.9em;color:#666">
+        <label style="margin-left:auto;font-size:0.9em;color:var(--text-muted)">
           <input type="checkbox" id="anom-autorefresh" checked />
           <span data-i18n="anom.autorefresh">auto-refresh (10s)</span>
         </label>

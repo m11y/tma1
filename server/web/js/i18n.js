@@ -1055,9 +1055,13 @@ var I18N = {
     'anom.autorefresh': '自动刷新（10s）',
     'anom.empty': '当前窗口内未检测到异常。',
     'anom.session_link_title': '打开会话详情',
-    'anom.sev.high': '高',
-    'anom.sev.medium': '中',
-    'anom.sev.low': '低',
+    // Severity values stay in English across all locales to match
+    // the canonical server-side enum (high/medium/low) and the
+    // card/filter labels (HIGH/MEDIUM/LOW). Mixing translated 高/中/低
+    // with English HIGH in the same view reads inconsistently.
+    'anom.sev.high': 'high',
+    'anom.sev.medium': 'med',
+    'anom.sev.low': 'low',
     'anom.session_summary': '异常',
     'card.output_tokens': '输出 Token',
     'table.failures': '失败数',
@@ -1610,8 +1614,13 @@ var I18N = {
     'view.copilot_cli': 'Copilot CLI',
     'view.anomalies': 'Anomalías',
     'anom.card.total': 'Total',
-    'anom.card.high': 'ALTA',
-    'anom.card.medium': 'MEDIA',
+    // Severity labels (HIGH/MEDIUM/LOW + high/med/low) stay in
+    // English across all locales -- same convention as log-level
+    // labels (INFO/WARN/ERROR). Avoids mixing 'ALTA' with 'Solo
+    // HIGH' in the same view, which the previous translation pass
+    // produced.
+    'anom.card.high': 'HIGH',
+    'anom.card.medium': 'MEDIUM',
     'anom.card.sessions_affected': 'Sesiones afectadas',
     'anom.filter.all': 'Todas las severidades',
     'anom.filter.high_only': 'Solo HIGH',
@@ -1620,9 +1629,9 @@ var I18N = {
     'anom.refresh': 'Actualizar',
     'anom.empty': 'Sin anomalías en la ventana activa.',
     'anom.session_link_title': 'Abrir detalle de sesión',
-    'anom.sev.high': 'alta',
-    'anom.sev.medium': 'media',
-    'anom.sev.low': 'baja',
+    'anom.sev.high': 'high',
+    'anom.sev.medium': 'med',
+    'anom.sev.low': 'low',
     'anom.session_summary': 'Anomalías',
     'anom.autorefresh': 'auto-actualizar (10s)',
     'card.output_tokens': 'Tokens de Salida',
