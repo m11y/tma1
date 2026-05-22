@@ -83,6 +83,11 @@ function renderSessionDetail(timeline, stats) {
   html += '<div class="sess-insights-panel">';
   html += '<button class="sess-panel-toggle" onclick="sess_togglePanel(\x27left\x27)" title="' + t('ui.expand') + '">&#x21C9;</button>';
   html += sess_renderContextBar(stats.context);
+  // Anomalies block (filled async after render — see sess_loadDetailAnomalies).
+  // Starts hidden so the empty-state path leaves no vertical whitespace;
+  // sess_loadDetailAnomalies flips display back to "" when there are
+  // anomalies to show. Margin only applies when content is present.
+  html += '<div id="sess-detail-anomalies" style="display:none;margin:8px 0"></div>';
   html += sess_renderWaterfall(timeline, stats);
   if (stats.apiCalls.length > 0) html += sess_renderAPICalls(stats);
   html += sess_renderFileHeatmap(stats.files);
@@ -128,6 +133,7 @@ function renderSessionDetail(timeline, stats) {
 
   content.innerHTML = html;
   sess_initWaterfallClicks();
+  if (sessExpandedId) sess_loadDetailAnomalies(sessExpandedId);
   var scrollEl = document.getElementById('sess-timeline-scroll');
   if (scrollEl) {
     if (sessTargetTs) {
@@ -246,4 +252,48 @@ function sess_toggleDurPopover(e, info) {
       info.classList.remove('active');
     }, { once: true });
   }, 0);
+}
+
+// Load + render anomalies detected for this session into the slot inserted
+// by renderSessionDetail. Uses the same .sess-section / <details> pattern
+// as Waterfall / API calls / Heatmap so it visually slots in as just
+// another collapsible insight — and the same compact .anom-row primitive
+// from anomalies.js for the row markup.
+//
+// Default closed; the summary alone gives the agent/user the count + a
+// severity breakdown they can scan at a glance, without paying the
+// vertical real estate cost of the expanded rows.
+async function sess_loadDetailAnomalies(sessionID) {
+  var slot = document.getElementById('sess-detail-anomalies');
+  if (!slot) return;
+  // Helper: keep the empty-state path symmetric -- both the "no anomalies"
+  // and "fetch failed" branches must clear content AND hide the slot so
+  // its margin doesn't leak whitespace into the layout.
+  function clearSlot() { slot.innerHTML = ''; slot.style.display = 'none'; }
+  try {
+    var resp = await fetch('/api/anomalies?session_id=' + encodeURIComponent(sessionID));
+    if (!resp.ok) { clearSlot(); return; }
+    var data = await resp.json();
+    var items = data.anomalies || [];
+    if (items.length === 0) { clearSlot(); return; }
+
+    var sevCounts = { high: 0, medium: 0, low: 0 };
+    items.forEach(function (a) { sevCounts[a.severity] = (sevCounts[a.severity] || 0) + 1; });
+    var sevParts = [];
+    if (sevCounts.high) sevParts.push('<span style="color:var(--red)">' + sevCounts.high + ' ' + t('anom.sev.high') + '</span>');
+    if (sevCounts.medium) sevParts.push('<span style="color:var(--orange)">' + sevCounts.medium + ' ' + t('anom.sev.medium') + '</span>');
+    if (sevCounts.low) sevParts.push('<span style="color:var(--text-dim)">' + sevCounts.low + ' ' + t('anom.sev.low') + '</span>');
+    var sevSummary = sevParts.length ? ' · ' + sevParts.join(' · ') : '';
+
+    var rows = items.map(function (a) { return anom_renderRow(a, false); }).join('');
+    slot.style.display = '';
+    slot.innerHTML =
+      '<details class="sess-section">' +
+      '<summary>' + t('anom.session_summary') + ' (' + items.length + ')' + sevSummary + '</summary>' +
+      '<div class="anom-detail-list">' + rows + '</div>' +
+      '</details>';
+  } catch (err) {
+    console.error('sess_loadDetailAnomalies', err);
+    clearSlot();
+  }
 }

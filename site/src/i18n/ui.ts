@@ -30,14 +30,14 @@ export interface T {
 
 export const en: T = {
   lang: 'en',
-  title: 'TMA1 \u2014 Local-First LLM Agent Observability',
-  description: 'Local observability for your AI agents. Tokens, cost, latency, and conversation replay \u2014 on your machine.',
+  title: 'TMA1 \u2014 Close the Agent Loop, Locally',
+  description: 'Local observability that talks back. TMA1 records every LLM call on your machine, then feeds what it sees into the agent\u2019s next turn via hooks, MCP tools, and anomaly detection.',
   nav: { features: 'Features', how: 'How it works', security: 'Security' },
   hero: {
     hook: 'I needed to know what my agents cost \u2014 and whether they were doing anything dangerous.',
-    h1_1: 'Know what your agent is doing',
-    h1_2: 'and what it costs',
-    subtitle: 'Tokens, cost, latency \u2014 every LLM call, recorded <em>locally</em>. Click a spike to see which conversation is burning money.',
+    h1_1: 'Close the loop around your agent',
+    h1_2: 'with observability that talks back',
+    subtitle: 'TMA1 records every LLM call <em>locally</em>, then routes what it sees back into the agent\u2019s next turn \u2014 hooks, MCP tools, and anomaly detection.',
   },
   onboarding: { label: 'AGENT ONBOARDING', manual: 'Manual install' },
   highlights: [
@@ -55,6 +55,7 @@ export const en: T = {
       { num: '04', title: 'Tool analytics', desc: 'When your agent feels slow, is it the model or the tool calls? p50 and p95 latency per tool, call counts, success rates, and trend lines.' },
       { num: '05', title: 'Security monitoring', desc: 'Your agent can run shell commands, fetch URLs, and be fed injected prompts. TMA1 flags all of it. For OpenClaw it also tracks webhook errors and stuck sessions.' },
       { num: '06', title: 'Full-text search', desc: 'Type a keyword in the Sessions search tab and it finds matching conversations, tool calls, and results across all sessions. Click a result to open the session at that exact event.' },
+      { num: '07', title: 'Closes the agent loop', desc: 'Observability is half the story. TMA1 also feeds what it sees back to the agent — for <strong>both Claude Code and Codex</strong>. Five hooks inject a session digest, prior state, and live anomalies into the next turn. Seven MCP tools let the agent pull session state, build status, external changes, or peer-agent sessions on demand. Six anomaly rules route through the right channel — stale-view edits and repeated build failures block <code>Stop</code>; lower-priority signals land in the next user prompt. <code>/tma1-peer</code> brings what another agent just left on this project into the current one\'s context, so no copy-paste between terminals. One-shot install per agent: <code>TMA1_ADAPTER=claude-code</code> or <code>TMA1_ADAPTER=codex</code>.' },
     ],
   },
   how: {
@@ -97,14 +98,14 @@ export const en: T = {
 
 export const zh: T = {
   lang: 'zh',
-  title: 'TMA1 \u2014 LLM Agent \u672c\u5730\u53ef\u89c2\u6d4b',
-  description: 'AI agent \u672c\u5730\u53ef\u89c2\u6d4b\u3002Token\u3001\u8d39\u7528\u3001\u5ef6\u8fdf\u3001\u5bf9\u8bdd\u56de\u653e\u2014\u2014\u5168\u90e8\u5728\u4f60\u7684\u673a\u5668\u4e0a\u3002',
+  title: 'TMA1 \u2014 \u7ed9 agent \u95ed\u73af\uff08\u672c\u5730\u4f18\u5148\uff09',
+  description: '\u672c\u5730\u53ef\u89c2\u6d4b\uff0c\u8fd8\u80fd\u56de\u704c\u3002TMA1 \u628a agent \u7684\u6bcf\u4e00\u6b21 LLM \u8c03\u7528\u8bb0\u5728\u4f60\u673a\u5668\u4e0a\uff0c\u518d\u901a\u8fc7 hooks\u3001MCP\u3001anomaly \u68c0\u6d4b\u628a\u8fd9\u4e9b\u4fe1\u53f7\u9001\u56de agent \u7684\u4e0b\u4e00\u8f6e\u3002',
   nav: { features: '\u529f\u80fd', how: '\u5de5\u4f5c\u539f\u7406', security: '\u5b89\u5168' },
   hero: {
     hook: '\u6211\u60f3\u77e5\u9053 agent \u5230\u5e95\u82b1\u4e86\u591a\u5c11\u94b1\uff0c\u6709\u6ca1\u6709\u5728\u641e\u5371\u9669\u64cd\u4f5c\u3002',
-    h1_1: '\u4f60\u7684 agent \u5728\u505a\u4ec0\u4e48',
-    h1_2: '\u82b1\u4e86\u591a\u5c11\u94b1',
-    subtitle: 'Token\u3001\u8d39\u7528\u3001\u5ef6\u8fdf\u2014\u2014\u6bcf\u6b21 LLM \u8c03\u7528\uff0c<em>\u672c\u5730</em>\u8bb0\u5f55\u3002\u70b9\u5f00\u4e00\u4e2a\u5c16\u5cf0\uff0c\u770b\u54ea\u4e2a\u5bf9\u8bdd\u5728\u70e7\u94b1\u3002',
+    h1_1: '\u7ed9\u4f60\u7684 agent \u95ed\u73af',
+    h1_2: '\u8ba9\u53ef\u89c2\u6d4b\u80fd\u5f80\u56de\u9001',
+    subtitle: 'TMA1 \u5728<em>\u672c\u5730</em>\u8bb0\u4e0b agent \u6bcf\u4e00\u6b21 LLM \u8c03\u7528\uff0c\u518d\u901a\u8fc7 hooks\u3001MCP\u3001anomaly \u68c0\u6d4b\u628a\u770b\u5230\u7684\u4e1c\u897f\u9001\u56de agent \u7684\u4e0b\u4e00\u8f6e reasoning\u3002',
   },
   onboarding: { label: 'AGENT \u63a5\u5165', manual: '\u624b\u52a8\u5b89\u88c5' },
   highlights: [
@@ -122,6 +123,7 @@ export const zh: T = {
       { num: '04', title: '\u5de5\u5177\u5206\u6790', desc: 'Agent \u53d8\u6162\u4e86\uff0c\u662f\u6a21\u578b\u7684\u95ee\u9898\u8fd8\u662f\u5de5\u5177\u8c03\u7528\u7684\u95ee\u9898\uff1f\u6bcf\u4e2a\u5de5\u5177\u7684 p50\u3001p95 \u5ef6\u8fdf\uff0c\u8c03\u7528\u6b21\u6570\u3001\u6210\u529f\u7387\u3001\u8d8b\u52bf\u7ebf\u3002' },
       { num: '05', title: '\u5b89\u5168\u76d1\u63a7', desc: '\u4f60\u7684 agent \u80fd\u8dd1 shell \u547d\u4ee4\u3001\u8bf7\u6c42\u5916\u90e8 URL\u3001\u88ab\u6ce8\u5165 prompt\u3002TMA1 \u5168\u90e8\u6807\u8bb0\u3002OpenClaw \u7684 webhook \u9519\u8bef\u548c\u5361\u6b7b\u7684 session \u4e5f\u4f1a\u8ffd\u8e2a\u3002' },
       { num: '06', title: '\u5168\u6587\u641c\u7d22', desc: '\u5728 Sessions \u641c\u7d22\u6846\u8f93\u5165\u5173\u952e\u8bcd\uff0c\u6240\u6709 session \u7684\u5bf9\u8bdd\u548c\u5de5\u5177\u8c03\u7528\u90fd\u80fd\u641c\u5230\u3002\u70b9\u51fb\u7ed3\u679c\u76f4\u63a5\u8df3\u5230\u90a3\u4e2a\u4e8b\u4ef6\u3002' },
+      { num: '07', title: '\u8ba9 agent \u5f62\u6210\u95ed\u73af', desc: '\u89c2\u6d4b\u53ea\u662f\u4e00\u534a\u3002TMA1 \u4f1a\u628a\u770b\u5230\u7684\u4e1c\u897f\u56de\u705c\u7ed9 agent\u3002\u4e94\u4e2a Claude Code hook \u5728\u4e0b\u4e00\u8f6e\u628a session \u6458\u8981\u3001\u4e0a\u4e0b\u6587\u72b6\u6001\u548c\u5b9e\u65f6 anomaly \u6ce8\u5165 prompt\u3002\u4e03\u4e2a MCP \u5de5\u5177\u8ba9 agent \u6309\u9700\u62c9\u53d6 session \u72b6\u6001\u3001build \u72b6\u6001\u3001\u5916\u90e8\u53d8\u66f4\u3001\u540c\u9879\u76ee\u4e0a\u522b\u7684 agent \u4f1a\u8bdd\u3002\u516d\u6761 anomaly \u89c4\u5219\u6309\u4f18\u5148\u7ea7\u8d70\u4e0d\u540c\u6ce8\u5165\u901a\u9053\u2014\u2014stale-view \u7f16\u8f91\u3001\u91cd\u590d\u6784\u5efa\u5931\u8d25\u4f1a block <code>Stop</code>\uff1b\u4f4e\u4f18\u5148\u7ea7\u4fe1\u53f7\u8d70\u4e0b\u6b21 user prompt\u3002<code>/tma1-peer codex</code> \u4e00\u952e\u628a Codex \u521a\u5728\u8fd9\u4e2a\u9879\u76ee\u7559\u4e0b\u7684\u5185\u5bb9\u5e26\u5165 Claude \u7684\u4e0a\u4e0b\u6587\uff0c\u4e0d\u7528\u5728 terminal \u4e4b\u95f4\u62f7\u6765\u62f7\u53bb\u3002' },
     ],
   },
   how: {
@@ -164,14 +166,14 @@ export const zh: T = {
 
 export const es: T = {
   lang: 'es',
-  title: 'TMA1 \u2014 Observabilidad Local para Agentes LLM',
-  description: 'Observabilidad local para tus agentes de IA. Tokens, costos, latencia y replay de conversaciones \u2014 en tu m\u00e1quina.',
+  title: 'TMA1 \u2014 Cerr\u00e1 el loop del agente, en local',
+  description: 'Observabilidad local que le responde al agente. TMA1 graba cada llamada LLM en tu m\u00e1quina y reinyecta lo que ve en el pr\u00f3ximo turno del agente v\u00eda hooks, herramientas MCP y detecci\u00f3n de anomal\u00edas.',
   nav: { features: 'Funcionalidades', how: 'C\u00f3mo funciona', security: 'Seguridad' },
   hero: {
     hook: 'Necesitaba saber cu\u00e1nto cuestan mis agentes \u2014 y si estaban haciendo algo peligroso.',
-    h1_1: 'Sab\u00e9 qu\u00e9 hace tu agente',
-    h1_2: 'y cu\u00e1nto te cuesta',
-    subtitle: 'Tokens, costo, latencia \u2014 cada llamada LLM, registrada <em>localmente</em>. Hac\u00e9 clic en un pico para ver qu\u00e9 conversaci\u00f3n est\u00e1 quemando plata.',
+    h1_1: 'Cerr\u00e1 el loop alrededor de tu agente',
+    h1_2: 'con observabilidad que le responde',
+    subtitle: 'TMA1 graba cada llamada LLM <em>localmente</em>, despu\u00e9s reinyecta lo que ve en el pr\u00f3ximo turno del agente \u2014 hooks, MCP y detecci\u00f3n de anomal\u00edas.',
   },
   onboarding: { label: 'ONBOARDING DEL AGENTE', manual: 'Instalaci\u00f3n manual' },
   highlights: [
@@ -189,6 +191,7 @@ export const es: T = {
       { num: '04', title: 'An\u00e1lisis de herramientas', desc: 'Cuando tu agente se siente lento, \u00bfes el modelo o las herramientas? p50 y p95 de latencia por herramienta, conteos de llamadas, tasas de \u00e9xito y l\u00edneas de tendencia.' },
       { num: '05', title: 'Monitoreo de seguridad', desc: 'Tu agente puede ejecutar comandos shell, hacer fetches a URLs externas y recibir prompts inyectados. TMA1 marca todo. Para OpenClaw tambi\u00e9n rastrea errores de webhook y sesiones atascadas.' },
       { num: '06', title: 'B\u00fasqueda de texto completo', desc: 'Escrib\u00ed una palabra clave en la pesta\u00f1a de b\u00fasqueda de Sessions y aparecen las conversaciones, herramientas y resultados que coinciden. Hac\u00e9 clic en un resultado para abrir la sesi\u00f3n en ese evento exacto.' },
+      { num: '07', title: 'Cierra el loop del agente', desc: 'La observabilidad es la mitad. TMA1 tambi\u00e9n reinyecta lo que ve al loop del agente \u2014 <strong>para Claude Code y Codex</strong>. Cinco hooks prependen un resumen de sesi\u00f3n, estado previo y anomal\u00edas en vivo al pr\u00f3ximo turno. Siete herramientas MCP le permiten al agente pedir estado de sesi\u00f3n, build, cambios externos o sesiones de agentes pares cuando las necesita. Seis reglas de anomal\u00eda se enrutan por canal \u2014 ediciones sobre vistas obsoletas y fallos de build repetidos bloquean <code>Stop</code>; las se\u00f1ales de menor prioridad llegan al pr\u00f3ximo user prompt. <code>/tma1-peer</code> trae al contexto del agente actual lo que otro agente acaba de dejar en este proyecto, sin saltar entre terminales. Una sola l\u00ednea por agente: <code>TMA1_ADAPTER=claude-code</code> o <code>TMA1_ADAPTER=codex</code>.' },
     ],
   },
   how: {

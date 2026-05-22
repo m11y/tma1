@@ -1,8 +1,11 @@
 ---
 name: tma1
-version: 0.2.0
+version: 0.3.0
 description: |
-  Local-first LLM agent observability.
+  Local-first LLM agent observability that closes the loop:
+  records every LLM call on the user's machine, then feeds what
+  it sees back into the agent's next turn via hooks, MCP tools,
+  and anomaly detection.
 
   Use when users say:
   - "install tma1"
@@ -20,6 +23,15 @@ description: |
   - "what is my agent executing"
   - "agent security audit"
   - "prompt injection risk"
+  - "close the agent loop"
+  - "inject session context"
+  - "call tma1 MCP tools"
+  - "list anomalies"
+  - "show me detected anomalies"
+  - "what did Codex / OpenClaw / Copilot do on this project"
+  - "/tma1-peer"
+  - "block stop on anomalies"
+  - "what's the build status"
 
 keywords:
   - tma1
@@ -29,6 +41,12 @@ keywords:
   - agent monitoring
   - local telemetry
   - otel
+  - agent-loop
+  - hooks
+  - mcp
+  - mcp-server
+  - anomalies
+  - peer-agent
 metadata:
   openclaw:
     emoji: "🪨"
@@ -94,6 +112,117 @@ Dashboard: **http://localhost:14318**
 
 ---
 
+## Agent loop (v2)
+
+Beyond passive recording, TMA1 v2 routes what it sees back into the
+agent's reasoning loop. Currently wired for **Claude Code** and
+**Codex**; the surface is adapter-shaped, so any future agent that
+exposes hook + MCP integration points can plug in the same way.
+
+Three channels:
+
+**Hooks** — the install adapter registers every hook event the host
+agent supports. Five of those events also pull injection content
+from the server, prepended to the agent's next prompt or used as a
+Stop block:
+
+| Event | What gets injected | CC | Codex |
+| --- | --- | :-: | :-: |
+| `UserPromptSubmit` | Per-turn `<tma1-context>` digest — session focus, tokens, recent files, active anomalies (delta-only after the first turn) | ✓ | ✓ |
+| `PostToolUse` | Per-tool anomaly notes when a rule explicitly routes to this channel | ✓ | ✓ |
+| `SessionStart` | Project orientation + prior-session carry-forward | ✓ | ✓ |
+| `PreCompact` | Session digest folded into the compaction summary so it survives context loss | ✓ | — (no equivalent in Codex's hook catalogue) |
+| `Stop` | JSON block decision when unresolved HIGH-severity anomalies exist; agent refuses to terminate | ✓ | ✓ |
+
+CC posts the response body raw; Codex posts with `?envelope=codex`
+and the same content gets wrapped in
+`hookSpecificOutput.additionalContext`. Either way the agent sees
+the digest at the right turn boundary.
+
+**MCP stdio tools** — `tma1-server mcp-serve` is registered in each
+agent's native MCP config (`~/.claude.json` `mcpServers.tma1` for
+CC, `~/.codex/config.toml` `[mcp_servers.tma1]` for Codex). The
+agent pulls state on demand:
+
+| Tool | When to call | Returns |
+| --- | --- | --- |
+| `get_context_bundle` | Top of a turn, or after compaction | Full perception bundle (session + anomalies + build + external + project) |
+| `get_session_state` | Recovering action history | Tool calls, tokens, current focus, recent files |
+| `get_anomalies` | Before changing approach | Active anomalies, post-suppression |
+| `get_build_status` | After suggesting edits | Last exit, errors in last 30 min, latest stderr line |
+| `get_external_changes` | After a long break | Human-attributed file edits + git activity |
+| `get_project_state` | First time in an unfamiliar repo | Language / build / test / key files / top-level dirs |
+| `get_peer_sessions` | User asks "what did Codex / CC / OpenClaw / Copilot just do" or invokes `/tma1-peer` | Recent peer-agent sessions on the same project |
+
+`get_peer_sessions` is caller-aware: the adapter writes
+`TMA1_MCP_CALLER` into the MCP `env` block at install time, so a
+CC caller's empty-`agent_source` query excludes CC's own sessions
+and a Codex caller's excludes Codex's. No accidental self-loops.
+
+**Anomaly rules** — six rules detect agent-loop pathologies; each
+routes to a specific channel so the same finding never injects twice:
+
+| Kind | Trigger | Channel |
+| --- | --- | --- |
+| `stale_file_view` | Agent edits a file a human modified externally after the agent's last Read | `user_prompt_submit` |
+| `build_broken_after_my_edit` | Build/test failure naming a just-edited file | `stop_block` when ≥3 failures, else `user_prompt_submit` |
+| `repeated_failed_build` | Same Bash prefix failed 3+ times in 30 min | `stop_block` |
+| `test_stuck` | Same test-runner prefix failed 3+ times (go test / cargo test / pytest / jest / mocha / rspec / phpunit / mix test) | `user_prompt_submit` |
+| `human_modified_during_session` | Human-attributed changes during the active session | `user_prompt_submit` |
+| `context_pressure` | Session input tokens cross threshold (default 100k; override via `TMA1_CONTEXT_PRESSURE_THRESHOLD`) | `user_prompt_submit` |
+
+Per-session 10-minute suppression dedupes repeat emits. Resolution
+checks auto-clear an anomaly when the agent visibly addresses it
+(re-reads a stale file, ships a passing Bash command), so a fix in
+turn N stops the warning in turn N+1.
+
+**`/tma1-peer`** — pull a peer agent's recent sessions on this
+project into the current agent's context without copy-paste:
+
+- `/tma1-peer codex` — Codex's latest session.
+- `/tma1-peer copilot 2` — last 2 Copilot CLI sessions.
+- `/tma1-peer` alone — latest session per peer agent (caller
+  excluded automatically).
+
+CC gets a native slash command at `~/.claude/commands/tma1-peer.md`
+plus a fallback skill at `~/.claude/skills/tma1-peer/SKILL.md`.
+Codex gets a skill at `~/.agents/skills/tma1-peer/SKILL.md` —
+invoke it the same way you invoke any Codex skill.
+
+**One-shot wiring**:
+
+```
+# Claude Code
+curl -fsSL https://tma1.ai/install.sh | TMA1_ADAPTER=claude-code bash
+
+# Codex
+curl -fsSL https://tma1.ai/install.sh | TMA1_ADAPTER=codex bash
+```
+
+Both call `tma1-server install --adapter <name>` after the service
+is healthy. Each adapter writes its agent's native config shape
+idempotently — re-running only updates what's stale:
+
+| Adapter | Hooks file | MCP config | Skill / command drop | Instructions block |
+| --- | --- | --- | --- | --- |
+| `claude-code` | `~/.claude/settings.json` | `~/.claude.json` `mcpServers.tma1` | `~/.claude/{skills,commands}/` | `CLAUDE.md` (fallback `AGENTS.md` when `CLAUDE.md` is absent) |
+| `codex` | `~/.codex/hooks.json` | `~/.codex/config.toml` `[mcp_servers.tma1]` | `~/.agents/skills/tma1-peer/` | `AGENTS.md` |
+
+Preview the diff before writing: `tma1-server install --adapter <name> --dry-run`.
+
+Reverse with `tma1-server uninstall --adapter <name>` — adapter-
+scoped, surgical, leaves user-owned hooks / MCP servers / skills
+intact. Add `--purge-data` if you also want to wipe `~/.tma1/data/`
+and `~/.tma1/bin/`.
+
+Future adapters plug into the same surface: add a `*Installer`
+under `internal/hooks/` plus an `--adapter <name>` case in
+`cmd/tma1-server/main.go`, and the rest of the v2 surface (hook
+injection, MCP, `/tma1-peer`, instructions block) comes along for
+free.
+
+---
+
 ## Definition of Done
 
 This task is NOT complete until all of the following are true:
@@ -148,6 +277,29 @@ If a clean reinstall is needed (wipes all data, config, and logs):
 ```bash
 curl -fsSL https://tma1.ai/install.sh | TMA1_FORCE=1 bash
 ```
+
+If you also want the **agent loop** wired up (hooks + MCP server +
+`/tma1-peer`) in a single shot, pass the adapter for your host
+agent:
+
+```bash
+# Claude Code
+curl -fsSL https://tma1.ai/install.sh | TMA1_ADAPTER=claude-code bash
+
+# Codex
+curl -fsSL https://tma1.ai/install.sh | TMA1_ADAPTER=codex bash
+```
+
+Either form calls `tma1-server install --adapter <name>` after the
+service is healthy. The adapter writes the agent's native config
+(see the table in the **Agent loop (v2)** section above for the
+exact files touched), drops the `tma1-peer` skill / command, and
+adds a `<!-- tma1:start -->` block to the project's instructions
+file. Idempotent — repeat runs only update what's stale. When this
+path runs, the manual hook edits in Step 5 are no longer necessary
+for that agent; verification still applies.
+
+Preview before writing: `tma1-server install --adapter <name> --dry-run`.
 
 Wait ~15 seconds for the database to start, then verify:
 

@@ -10,7 +10,22 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/tma1-ai/tma1/server/internal/derive"
+	"github.com/tma1-ai/tma1/server/internal/sqlutil"
 )
+
+// nullableBool renders *bool as TRUE/FALSE/NULL SQL literal.
+// Local to transcript package; sqlutil.Quote handles string columns.
+func nullableBool(b *bool) string {
+	if b == nil {
+		return "NULL"
+	}
+	if *b {
+		return "TRUE"
+	}
+	return "FALSE"
+}
 
 const (
 	codexScanInterval = 5 * time.Second
@@ -68,6 +83,14 @@ func (w *Watcher) scanCodexSessions(baseDir string) {
 	w.mu.Unlock()
 
 	// Walk today's and yesterday's date dirs to find active JSONL files.
+	//
+	// Two passes per directory: first peek every new file's session_meta
+	// (synchronous, one line per file) to publish each main session's
+	// conversation UUID, then start the tail goroutines. Without this
+	// pre-pass the subagent goroutine can race ahead of the parent
+	// goroutine on a restart — `lookupCodexParentSession` returns ""
+	// and the subagent's lifecycle rows fall back to the filename
+	// prefix instead of attaching to the parent's UUID.
 	for _, offset := range []int{0, -1} {
 		d := now.AddDate(0, 0, offset)
 		dir := filepath.Join(baseDir, d.Format("2006"), d.Format("01"), d.Format("02"))
@@ -75,6 +98,11 @@ func (w *Watcher) scanCodexSessions(baseDir string) {
 		if err != nil {
 			continue
 		}
+
+		type pending struct {
+			watcherKey, sessionID, filePath string
+		}
+		var queue []pending
 		for _, entry := range entries {
 			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
 				continue
@@ -88,13 +116,70 @@ func (w *Watcher) scanCodexSessions(baseDir string) {
 			// Files from the same run share the timestamp prefix but have different UUIDs
 			// (main session vs subagent).
 			baseName := strings.TrimSuffix(entry.Name(), ".jsonl")
-			// watcherKey is unique per file; sessionID groups files from the same run.
 			sessionID := codexSessionGroup(baseName)
 			watcherKey := "codex:" + baseName
 			filePath := filepath.Join(dir, entry.Name())
-			w.watchCodex(watcherKey, sessionID, filePath)
+
+			// Skip the peek for files we're already watching — their
+			// goroutine will (or already did) publish the UUID via
+			// processCodexLine.
+			w.mu.Lock()
+			_, watched := w.sessions[watcherKey]
+			w.mu.Unlock()
+			if !watched {
+				if uuid, isMain := peekCodexMainUUID(filePath); isMain && uuid != "" {
+					w.recordCodexParentSession(sessionID, uuid)
+				}
+			}
+			queue = append(queue, pending{watcherKey, sessionID, filePath})
+		}
+
+		// Pass 2: start goroutines now that every main session's UUID
+		// is in the parent-session map.
+		for _, p := range queue {
+			w.watchCodex(p.watcherKey, p.sessionID, p.filePath)
 		}
 	}
+}
+
+// peekCodexMainUUID opens a Codex rollout file, reads only the first
+// JSON line, and returns (uuid, true) when the line is a session_meta
+// event for a MAIN session (no source.subagent). Used by the scanner
+// to pre-publish parent UUIDs before any subagent goroutine starts,
+// closing the lookupCodexParentSession race.
+//
+// Best-effort: any IO or parse failure returns ("", false), and the
+// caller falls back to the in-line publish path inside processCodexLine.
+func peekCodexMainUUID(filePath string) (string, bool) {
+	f, err := os.Open(filePath) //nolint:gosec
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	reader := bufio.NewReader(f)
+	// session_meta line is small (~200 bytes). 8KB cap is generous.
+	line, err := reader.ReadString('\n')
+	if err != nil && line == "" {
+		return "", false
+	}
+	var ev codexEvent
+	if json.Unmarshal([]byte(strings.TrimSpace(line)), &ev) != nil || ev.Type != "session_meta" {
+		return "", false
+	}
+	var meta struct {
+		ID     string          `json:"id"`
+		Source json.RawMessage `json:"source"`
+	}
+	if json.Unmarshal(ev.Payload, &meta) != nil || meta.ID == "" {
+		return "", false
+	}
+	var subSource struct {
+		Subagent string `json:"subagent"`
+	}
+	if json.Unmarshal(meta.Source, &subSource) == nil && subSource.Subagent != "" {
+		return "", false // subagent file, skip
+	}
+	return meta.ID, true
 }
 
 // codexSessionGroup extracts the timestamp prefix from a Codex JSONL filename.
@@ -240,7 +325,29 @@ type codexFileContext struct {
 	agentID        string
 	agentType      string
 	conversationID string // from session_meta.payload.id (= OTel conversation.id)
-	live           bool   // true after initial backfill completes (first EOF)
+	// sessionID overrides the filename-based default ONLY for main
+	// sessions, where it is set to the conversation UUID so JSONL-derived
+	// rows share session_id with hook-derived rows (the hook handler
+	// keys on the same UUID — see handler/hooks.go where it pulls
+	// session_id from the Codex hook payload). Empty for subagent files
+	// so the filename-prefix grouping that links parent + subagent
+	// rollout files is preserved.
+	sessionID string
+	live      bool // true after initial backfill completes (first EOF)
+}
+
+// effectiveSessionID returns the conversation UUID once session_meta
+// has been parsed for a main-session rollout file, otherwise the
+// filename-based fallback. This is what aligns the JSONL parser's
+// session_id with the hook handler's session_id (= the same Codex
+// conversation UUID), so the live-gate dedup and the dashboard's
+// per-session grouping both see ONE session per Codex run instead
+// of two.
+func (c *codexFileContext) effectiveSessionID(fallback string) string {
+	if c != nil && c.sessionID != "" {
+		return c.sessionID
+	}
+	return fallback
 }
 
 func (w *Watcher) processCodexLine(sessionID, line string, seen map[string]struct{}, fctx *codexFileContext) {
@@ -263,6 +370,7 @@ func (w *Watcher) processCodexLine(sessionID, line string, seen map[string]struc
 			Source json.RawMessage `json:"source"`
 			CWD    string          `json:"cwd"`
 		}
+		isSubagent := false
 		if err := json.Unmarshal(ev.Payload, &meta); err == nil {
 			if meta.ID != "" {
 				fctx.conversationID = meta.ID
@@ -270,19 +378,49 @@ func (w *Watcher) processCodexLine(sessionID, line string, seen map[string]struc
 			var subSource struct {
 				Subagent string `json:"subagent"`
 			}
-			if json.Unmarshal(meta.Source, &subSource) == nil && subSource.Subagent != "" {
+			isSubagent = json.Unmarshal(meta.Source, &subSource) == nil && subSource.Subagent != ""
+			if isSubagent {
 				fctx.agentID = codexSubagentID(fctx.fileID, subSource.Subagent)
 				fctx.agentType = subSource.Subagent
-				w.insertCodexSubagentEvent(sessionID, ts, fctx.agentID, fctx.agentType, fctx.conversationID)
-				if fctx.live {
-					w.broadcastHookEvent(sessionID, "SubagentStart", "", "", "", "", fctx.agentID, fctx.agentType)
+				// Subagent files: try to attribute to the PARENT's
+				// conversation UUID via the Watcher map (keyed on
+				// shared timestamp prefix). If found, the dashboard's
+				// per-session SUM(SubagentStart) attaches under the
+				// parent. If NOT found (e.g. Codex 0.131.0's `code
+				// review` mode spawns a subagent rollout whose
+				// session_meta carries no parent reference AND its
+				// timestamp prefix doesn't match any main session),
+				// fall back to the subagent's OWN conversation UUID —
+				// NOT the filename prefix, which would create a
+				// "rollout-..." pseudo-session_id that mismatches
+				// every hook-derived row and confuses the UI.
+				if parentUUID := w.lookupCodexParentSession(sessionID); parentUUID != "" {
+					fctx.sessionID = parentUUID
+				} else if meta.ID != "" {
+					fctx.sessionID = meta.ID
 				}
-				break
+			} else if meta.ID != "" {
+				// Main session: promote conversation UUID to be the
+				// canonical session_id so every JSONL-derived row matches
+				// what the hook handler writes for the same run. Publish
+				// to the parent-session map so subagent goroutines in
+				// the same Codex run can attribute their lifecycle
+				// events to this UUID.
+				fctx.sessionID = meta.ID
+				w.recordCodexParentSession(sessionID, meta.ID)
 			}
 		}
-		w.insertCodexSessionStart(sessionID, ts, meta.CWD, fctx.conversationID)
+		sid := fctx.effectiveSessionID(sessionID)
+		if isSubagent {
+			w.insertCodexSubagentEvent(sid, ts, fctx.agentID, fctx.agentType, fctx.conversationID, meta.CWD)
+			if fctx.live {
+				w.broadcastHookEvent(sid, "SubagentStart", "", "", "", "", fctx.agentID, fctx.agentType)
+			}
+			break
+		}
+		w.insertCodexSessionStart(sid, ts, meta.CWD, fctx.conversationID)
 		if fctx.live {
-			w.broadcastHookEvent(sessionID, "SessionStart", "", "", "", "", "", "")
+			w.broadcastHookEvent(sid, "SessionStart", "", "", "", "", "", "")
 		}
 
 	case "turn_context":
@@ -291,7 +429,7 @@ func (w *Watcher) processCodexLine(sessionID, line string, seen map[string]struc
 			Model string `json:"model"`
 		}
 		if json.Unmarshal(ev.Payload, &turnCtx) == nil && turnCtx.Model != "" {
-			w.insertCodexModelMessage(sessionID, ts, turnCtx.Model, seen)
+			w.insertCodexModelMessage(fctx.effectiveSessionID(sessionID), ts, turnCtx.Model, seen)
 		}
 
 	case "event_msg":
@@ -303,21 +441,22 @@ func (w *Watcher) processCodexLine(sessionID, line string, seen map[string]struc
 		if err := json.Unmarshal(ev.Payload, &eventMsg); err != nil {
 			return
 		}
+		sid := fctx.effectiveSessionID(sessionID)
 		switch eventMsg.Type {
 		case "task_complete":
 			// Emit SubagentStop for subagent files.
 			if fctx.agentID != "" {
-				w.insertCodexHookEvent(sessionID, ts, "SubagentStop", "", "", "", "", fctx)
+				w.insertCodexHookEvent(sid, ts, "SubagentStop", "", "", "", "", fctx)
 			}
 		case "user_message":
 			msg := strings.TrimSpace(eventMsg.Message)
 			if msg != "" {
-				w.insertCodexMessage(sessionID, ts, "user", msg, seen)
+				w.insertCodexMessage(sid, ts, "user", msg, seen)
 			}
 		case "agent_message":
 			msg := strings.TrimSpace(eventMsg.Message)
 			if msg != "" {
-				w.insertCodexMessage(sessionID, ts, "assistant", msg, seen)
+				w.insertCodexMessage(sid, ts, "assistant", msg, seen)
 			}
 		}
 
@@ -326,7 +465,7 @@ func (w *Watcher) processCodexLine(sessionID, line string, seen map[string]struc
 		if err := json.Unmarshal(ev.Payload, &item); err != nil {
 			return
 		}
-		w.processCodexResponseItem(sessionID, ts, item, seen, fctx)
+		w.processCodexResponseItem(fctx.effectiveSessionID(sessionID), ts, item, seen, fctx)
 	}
 }
 
@@ -373,6 +512,11 @@ func (w *Watcher) processCodexResponseItem(sessionID string, ts time.Time, item 
 // insertCodexModelMessage stores a synthetic message with the model field set.
 // This makes the model visible in session detail KPI and cost calculation.
 func (w *Watcher) insertCodexModelMessage(sessionID string, ts time.Time, model string, seen map[string]struct{}) {
+	// NOT gated by codexLiveGate: this writes a row into tma1_messages,
+	// which the hook handler never duplicates (hooks only write
+	// tma1_hook_events). Gating here would silently kill conversation
+	// replay + prompt analysis + peer-session content for active Codex
+	// sessions. The gate only belongs on tma1_hook_events writers.
 	key := "model:" + model
 	if _, ok := seen[key]; ok {
 		return
@@ -409,6 +553,9 @@ func (w *Watcher) insertCodexModelMessage(sessionID string, ts time.Time, model 
 }
 
 func (w *Watcher) insertCodexMessage(sessionID string, ts time.Time, role, content string, seen map[string]struct{}) {
+	// NOT gated by codexLiveGate -- same reasoning as
+	// insertCodexModelMessage above. Writes tma1_messages, never
+	// duplicated by the hook handler.
 	// Dedup by content prefix hash.
 	prefix := content
 	if len(prefix) > 200 {
@@ -454,7 +601,47 @@ func (w *Watcher) insertCodexMessage(sessionID string, ts time.Time, role, conte
 	}()
 }
 
+// codexHookCoveredEvents lists the tma1_hook_events.event_type values
+// that the Codex hook handler writes itself. Must stay in sync with
+// install_codex.go's codexHookEvents — that's the list registered in
+// ~/.codex/hooks.json, so any event NOT in this set is JSONL-only and
+// the parser is the only writer.
+//
+// Notably absent: SubagentStart / SubagentStop. Codex never POSTs those
+// (its hook catalogue has no subagent lifecycle event), so the JSONL
+// parser must keep writing them even when the live gate is active.
+var codexHookCoveredEvents = map[string]struct{}{
+	"SessionStart":     {},
+	"PreToolUse":       {},
+	"PostToolUse":      {},
+	"UserPromptSubmit": {},
+	"Stop":             {},
+}
+
+// codexLiveGate returns true when the Codex hook adapter is actively
+// posting events for this session AND the given event_type is one the
+// hook handler actually writes. nil gate => always false (parser stays
+// the sole writer, original behaviour).
+//
+// IMPORTANT: only call this from insertion paths that write to
+// tma1_hook_events. The hook handler never writes to tma1_messages,
+// so gating message-inserts would kill conversation replay for any
+// active Codex session. See `insertCodexMessage` /
+// `insertCodexModelMessage` for the deliberate exclusion.
+func (w *Watcher) codexLiveGate(sessionID, eventType string) bool {
+	if w.IsLiveSession == nil {
+		return false
+	}
+	if _, covered := codexHookCoveredEvents[eventType]; !covered {
+		return false
+	}
+	return w.IsLiveSession(sessionID)
+}
+
 func (w *Watcher) insertCodexSessionStart(sessionID string, ts time.Time, cwd, conversationID string) {
+	if w.codexLiveGate(sessionID, "SessionStart") {
+		return
+	}
 	msTs := ts.UnixMilli()
 	for {
 		prev := lastInsertTS.Load()
@@ -492,7 +679,10 @@ func codexSubagentID(fileID, agentType string) string {
 	return agentType
 }
 
-func (w *Watcher) insertCodexSubagentEvent(sessionID string, ts time.Time, agentID, agentType, conversationID string) {
+func (w *Watcher) insertCodexSubagentEvent(sessionID string, ts time.Time, agentID, agentType, conversationID, cwd string) {
+	if w.codexLiveGate(sessionID, "SubagentStart") {
+		return
+	}
 	msTs := ts.UnixMilli()
 	for {
 		prev := lastInsertTS.Load()
@@ -506,15 +696,21 @@ func (w *Watcher) insertCodexSubagentEvent(sessionID string, ts time.Time, agent
 		}
 	}
 
+	// Write cwd from the subagent's own session_meta so orphan
+	// subagent rollouts (Codex 0.131.0 `code review`, no parent)
+	// still surface a working dir on the dashboard. The dashboard
+	// groups by session_id and reduces with MAX(cwd) — without this
+	// row, an orphan subagent's WORKING DIR column stays blank.
 	sql := fmt.Sprintf(
 		"INSERT INTO tma1_hook_events "+
 			"(ts, session_id, event_type, agent_source, tool_name, tool_input, tool_result, "+
 			"tool_use_id, agent_id, agent_type, notification_type, \"message\", cwd, transcript_path, conversation_id) "+
-			"VALUES (%d, '%s', 'SubagentStart', 'codex', '', '', '', '', '%s', '%s', '', '', '', '', '%s')",
+			"VALUES (%d, '%s', 'SubagentStart', 'codex', '', '', '', '', '%s', '%s', '', '', '%s', '', '%s')",
 		msTs,
 		escapeSQLString(sessionID),
 		escapeSQLString(agentID),
 		escapeSQLString(agentType),
+		escapeSQLString(truncate(cwd, 512)),
 		escapeSQLString(conversationID),
 	)
 	go func() {
@@ -525,6 +721,9 @@ func (w *Watcher) insertCodexSubagentEvent(sessionID string, ts time.Time, agent
 }
 
 func (w *Watcher) insertCodexHookEvent(sessionID string, ts time.Time, eventType, toolName, toolInput, toolUseID, toolResult string, fctx *codexFileContext) {
+	if w.codexLiveGate(sessionID, eventType) {
+		return
+	}
 	msTs := ts.UnixMilli()
 	for {
 		prev := lastInsertTS.Load()
@@ -550,11 +749,21 @@ func (w *Watcher) insertCodexHookEvent(sessionID string, ts time.Time, eventType
 		conversationID = fctx.conversationID
 	}
 
+	// Derive the ingest-time columns the way the CC handler does
+	// (handler/hooks.go calls derive.Fields too). Without this,
+	// downstream queries that COALESCE(tool_file_path, regexp_match(...))
+	// would fall back to regex on every Codex row — measurable cost
+	// in the anomaly + peer paths.
+	filePath, cmdPrefix, success, errSummary := derive.Fields(
+		eventType, toolName, toolInput, toolResult, "",
+	)
+
 	sql := fmt.Sprintf(
 		"INSERT INTO tma1_hook_events "+
 			"(ts, session_id, event_type, agent_source, tool_name, tool_input, tool_result, "+
-			"tool_use_id, agent_id, agent_type, notification_type, \"message\", cwd, transcript_path, conversation_id) "+
-			"VALUES (%d, '%s', '%s', 'codex', '%s', '%s', '%s', '%s', '%s', '%s', '', '', '', '', '%s')",
+			"tool_use_id, agent_id, agent_type, notification_type, \"message\", cwd, transcript_path, conversation_id, "+
+			"tool_file_path, tool_command_prefix, tool_success, tool_error_summary) "+
+			"VALUES (%d, '%s', '%s', 'codex', '%s', '%s', '%s', '%s', '%s', '%s', '', '', '', '', '%s', %s, %s, %s, %s)",
 		msTs,
 		escapeSQLString(sessionID),
 		escapeSQLString(eventType),
@@ -565,6 +774,10 @@ func (w *Watcher) insertCodexHookEvent(sessionID string, ts time.Time, eventType
 		escapeSQLString(agentID),
 		escapeSQLString(agentType),
 		escapeSQLString(conversationID),
+		sqlutil.Quote(filePath, 512),
+		sqlutil.Quote(cmdPrefix, 200),
+		nullableBool(success),
+		sqlutil.Quote(errSummary, 400),
 	)
 	go func() {
 		insertSem <- struct{}{}

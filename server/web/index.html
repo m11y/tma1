@@ -1273,6 +1273,44 @@
     </div>
   </div><!-- /view-sessions -->
 
+  <!-- ========================= ANOMALIES VIEW ========================= -->
+  <div id="view-anomalies" style="display:none">
+    <div class="cards">
+      <div class="card">
+        <div class="label" data-i18n="anom.card.total">Total</div>
+        <div class="value" id="anom-val-total">&mdash;</div>
+      </div>
+      <div class="card">
+        <div class="label" data-i18n="anom.card.high">HIGH</div>
+        <div class="value" id="anom-val-high" style="color:var(--red)">&mdash;</div>
+      </div>
+      <div class="card">
+        <div class="label" data-i18n="anom.card.medium">MEDIUM</div>
+        <div class="value" id="anom-val-medium" style="color:var(--orange)">&mdash;</div>
+      </div>
+      <div class="card">
+        <div class="label" data-i18n="anom.card.sessions_affected">Sessions affected</div>
+        <div class="value" id="anom-val-sessions">&mdash;</div>
+      </div>
+    </div>
+    <div class="section">
+      <div class="filter-row" style="margin-bottom:8px">
+        <select id="anom-filter-sev" onchange="anom_render()">
+          <option value="" data-i18n="anom.filter.all">All severities</option>
+          <option value="high" data-i18n="anom.filter.high_only">HIGH only</option>
+          <option value="medium" data-i18n="anom.filter.medium_only">MEDIUM only</option>
+          <option value="low" data-i18n="anom.filter.low_only">LOW only</option>
+        </select>
+        <button class="filter-btn" onclick="anom_load()" data-i18n="anom.refresh">Refresh</button>
+        <label style="margin-left:auto;font-size:0.9em;color:var(--text-muted)">
+          <input type="checkbox" id="anom-autorefresh" checked />
+          <span data-i18n="anom.autorefresh">auto-refresh (10s)</span>
+        </label>
+      </div>
+      <div id="anom-list" style="display:flex;flex-direction:column;gap:8px"></div>
+    </div>
+  </div><!-- /view-anomalies -->
+
   <!-- ========================= PROMPTS VIEW ========================= -->
   <div id="view-prompts" style="display:none">
     <div class="cards">
@@ -1503,6 +1541,7 @@
   <script src="/js/sessions.js"></script>
   <script src="/js/agent-canvas.js"></script>
   <script src="/js/prompts.js"></script>
+  <script src="/js/anomalies.js"></script>
   <script src="/js/views.js"></script>
 </body>
 </html>

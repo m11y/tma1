@@ -21,26 +21,53 @@ Tagline: *"Your agent runs. TMA1 remembers."*
 
 | Path | Role |
 |------|------|
-| `server/` | Go binary: GreptimeDB process manager + HTTP server + dashboard |
-| `server/cmd/tma1-server/` | Entry point + embedded FS mount |
-| `server/internal/config/` | Env var config loading |
+| `server/` | Go binary: GreptimeDB process manager + HTTP server + dashboard + v2 agent-loop surface |
+| `server/cmd/tma1-server/` | Entry point + embedded FS mount + subcommand routing (`mcp-serve`, `install`, `build`) |
+| `server/internal/config/` | Env var config loading + persisted `~/.tma1/settings.json` |
 | `server/internal/install/` | Download and verify GreptimeDB binary |
-| `server/internal/greptimedb/` | Start, stop, health-check GreptimeDB process + Flow init |
-| `server/internal/handler/` | HTTP handlers: /health, /status, /api/query, /api/evaluate, /api/settings, /api/hooks, /api/hooks/stream (SSE), /v1/otlp/*, dashboard UI |
-| `server/internal/hooks/` | Hook script installer for Claude Code integration |
+| `server/internal/greptimedb/` | Start, stop, health-check GreptimeDB process + Flow init + versioned schema migrations + per-table DDL (`flows.go` / `anomaly_emits.go` / `build.go` / `external.go` / `project.go`) |
+| `server/internal/handler/` | HTTP handlers: /health, /status, /api/query, /api/evaluate, /api/settings, /api/hooks (now returns injection content), /api/hooks/stream (SSE), /api/anomalies{,/budget,/follow-rate}, /v1/otlp/*, dashboard UI |
+| `server/internal/hooks/` | Hook script installer + per-adapter wiring. `install_cc.go` (Claude Code: `~/.claude/settings.json` hooks + `~/.claude.json` MCP + `~/.claude/{skills,commands}/`). `install_codex.go` (Codex: `~/.codex/hooks.json` + `~/.codex/config.toml` `[mcp_servers.tma1]` + `~/.agents/skills/tma1-peer/`, TOML merge via `BurntSushi/toml`). `install_shared.go` carries the helpers both use (atomic writes, JSON-strict reads, owner-prefix-scoped stale sweep, instructions/.gitignore). |
 | `server/internal/transcript/` | JSONL transcript watcher (Claude Code) + Codex / OpenClaw / Copilot CLI session log parsers |
-| `server/web/` | Embedded dashboard (HTML + JS + CSS via embed.FS), 7 views: Claude Code, Codex, Copilot CLI, OpenClaw, OTel GenAI, Sessions, Prompts + Agent Canvas |
+| `server/internal/perception/` | v2 perception layer: bundler, anomaly detector (6 rules + channel routing + 10-min suppression + resolvers), incremental injection cache, peer-session reader, file writer for `.tma1-context.md` |
+| `server/internal/sensor/build/` | `tma1-server build [--watch] -- <cmd>` subprocess capture: stdout/stderr tee + batched writes into `tma1_build_events`, force-colour env injection |
+| `server/internal/sensor/git/` | fsnotify file watcher + 30 s git poll + agent-vs-human attribution honouring `.gitignore` + static ignore list; writes `tma1_external_changes` |
+| `server/internal/sensor/project/` | Lazy project-state indexer (language / build / test / key files / top-level dirs) with 24 h TTL gate; writes `tma1_project_state` |
+| `server/internal/mcp/` | JSON-RPC 2.0 stdio MCP server (7 tools backed by the perception bundler) — runs as a CC-spawned child via `tma1-server mcp-serve` |
+| `server/internal/writeq/` | Bounded write semaphore (max-in-flight cap, drop counter, recovered-panic counter) used by hook ingest + anomaly emit to keep GreptimeDB from being fork-bombed |
+| `server/internal/sqlutil/` | Single-source SQL helpers (`Escape`, `EscapeLike`, `Quote`) shared by perception, handler, sensors |
+| `server/internal/strutil/` | UTF-8-safe truncation (`SafeTruncate`) used wherever we cap a string before INSERT |
+| `server/internal/pathutil/` | Cross-platform path basename / split (handles POSIX + Windows separators for agent-supplied paths) |
+| `server/web/` | Embedded dashboard (HTML + JS + CSS via embed.FS), **8** views: Claude Code, Codex, Copilot CLI, OpenClaw, OTel GenAI, Sessions, Prompts, **Anomalies** + Agent Canvas |
 | `site/` | Astro landing page → GitHub Pages → tma1.ai |
 | `.claude-plugin/` | Claude Code Marketplace registration |
-| `claude-plugin/` | Claude Code plugin: skills for setup + inline queries |
-| `clawhub-skill/tma1/` | SKILL.md — ClawHub-format skill (OpenClaw integration) |
+| `claude-plugin/` | Claude Code plugin: `tma1-peer` skill + slash command (source synced into `server/internal/hooks/{skills,commands}/` via `make sync-plugin`, embedded in the binary, dropped to `~/.claude/{skills,commands}/` at install time) |
+| `clawhub-skill/tma1/` | SKILL.md + REFERENCE.md — ClawHub-format setup skill (OpenClaw integration), also published to tma1.ai via `site/package.json:prebuild` |
+| `docs/` | Long-form references: `hooks.md`, `mcp-tools.md`, `anomalies.md` |
 
 ## Architecture
 
 ```
 Agent (Claude Code / Codex / Copilot CLI / OpenClaw / any GenAI app)
     │  OTLP/HTTP → http://localhost:14318/v1/otlp
-    │  Hook events → http://localhost:14318/api/hooks (Claude Code)
+    │  Hook events → http://localhost:14318/api/hooks    [request–response.
+    │                                                    CC posts raw; Codex posts
+    │                                                    `?envelope=codex` and the
+    │                                                    handler wraps the same
+    │                                                    injection content in
+    │                                                    `hookSpecificOutput.additionalContext`.
+    │                                                    Five injection events:
+    │                                                    UserPromptSubmit / Stop /
+    │                                                    PostToolUse / SessionStart /
+    │                                                    PreCompact (PreCompact is
+    │                                                    CC-only — Codex's hook
+    │                                                    catalogue has no PreCompact).]
+    │  MCP stdio  ─── tma1-server mcp-serve (child)      [7 tools: get_context_bundle,
+    │                                                    get_session_state, get_anomalies,
+    │                                                    get_build_status,
+    │                                                    get_external_changes,
+    │                                                    get_project_state,
+    │                                                    get_peer_sessions]
     │  JSONL transcripts → ~/.claude/projects/ (CC) / ~/.codex/sessions/ (Codex) /
     │                      ~/.copilot/session-state/ (Copilot CLI) / ~/.openclaw/agents/ (OpenClaw)
     ▼
@@ -48,10 +75,17 @@ tma1-server  port 14318
     │  reverse-proxies OTLP to GreptimeDB
     │  auto-injects x-greptime-pipeline-name for trace requests
     │  receives hook events → tma1_hook_events + SSE broadcast
+    │  generates injection content via perception.Bundler + Detector
     │  watches JSONL transcripts → tma1_messages
+    │  sensors (started by handler.StartBackgroundTasks):
+    │     ├── sensor/git     → tma1_external_changes  (fsnotify + 30 s git poll)
+    │     ├── sensor/project → tma1_project_state     (lazy, 24 h TTL)
+    │     └── sensor/build   → tma1_build_events      (subprocess via `tma1-server build`)
+    │  writeq.Sem caps in-flight inserts (default 64); panics recovered, dropped jobs counted
     ▼
 GreptimeDB  (managed by tma1-server)
     │  Flow engine → tma1_*_1m aggregation tables
+    │  Versioned schema migrations via tma1_schema_version ledger
     │  HTTP SQL API  port 14000
     ▼
 Browser dashboard (served by tma1-server)
@@ -62,12 +96,15 @@ Browser dashboard (served by tma1-server)
     ├── OTel GenAI view: Overview, Traces, Cost, Security, Search (from gen_ai.* trace attrs)
     ├── Sessions view: Session list, full-screen detail overlay (two-column: Insights + Timeline), file heatmap, agent hierarchy, waterfall, canvas animation
     │   ├── CC/Codex/Copilot CLI "Sessions→" is a link that jumps to Sessions view with agent_source filter
+    │   ├── Anomalies panel inside session detail (reads /api/anomalies?session_id=…)
     │   ├── Replay mode: replay past sessions as agent orchestration animation
     │   └── Live mode: real-time SSE streaming of hook events → canvas visualization
-    └── Prompts view: Prompt evaluation & improvement (heuristic scoring + optional LLM-as-judge)
-        ├── Overview: score distribution, trend, top suggestions, dimension breakdown
-        ├── Prompts: card-based list with per-prompt scoring, suggestions, optional LLM deep eval
-        └── Patterns: verb-based grouping (fix/add/implement/debug/...) with avg score/cost/turns
+    ├── Prompts view: Prompt evaluation & improvement (heuristic scoring + optional LLM-as-judge)
+    │   ├── Overview: score distribution, trend, top suggestions, dimension breakdown
+    │   ├── Prompts: card-based list with per-prompt scoring, suggestions, optional LLM deep eval
+    │   └── Patterns: verb-based grouping (fix/add/implement/debug/...) with avg score/cost/turns
+    └── Anomalies view: cross-session anomaly list, severity filter, 10 s auto-refresh; budget +
+        follow-rate validation endpoints back the Phase 1.7 quality gates
 ```
 
 OTel data goes through tma1-server's OTLP proxy (`/v1/otlp/*`), which forwards to GreptimeDB (port 14000) and auto-injects the `x-greptime-pipeline-name: greptime_trace_v1` header for trace requests. Agents should send OTLP to `http://localhost:14318/v1/otlp`.
@@ -170,27 +207,60 @@ Additionally, OpenClaw JSONL session transcripts at `~/.openclaw/agents/<agentId
 Source columns use GenAI semantic conventions:
 `span_attributes.gen_ai.request.model`, `span_attributes.gen_ai.usage.input_tokens`, etc.
 
-## Session tables (from hooks + JSONL transcripts)
+## Session + v2 agent-loop tables
 
-2 tables for session-level conversation tracking, created by `InitSessionTables()` on startup:
+Created on startup by dedicated `Init*Table()` calls (kept out of `flows.sql`
+so they exist before any trace data arrives). All append-only. The
+`tma1_schema_version` ledger drives ALTER additions via
+`server/internal/greptimedb/schema_migrations.go`.
 
 | Table | Content |
 |-------|---------|
-| `tma1_hook_events` | All 27 CC hook event types (tool calls, subagent lifecycle, session start/end, compaction, permissions, file changes, tasks, etc.) + Codex / Copilot CLI / OpenClaw JSONL parsing. Columns include `conversation_id`, `permission_mode`, `metadata` (JSON blob for event-specific fields). append-only, SKIPPING INDEX on session_id, INVERTED INDEX on event_type/agent_source. |
-| `tma1_messages` | Conversation content: user/assistant/thinking messages, tool_use/tool_result (from JSONL transcripts). Columns include `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens` (from CC JSONL assistant message usage). append-only, FULLTEXT INDEX on content for keyword search via `matches_term()`. |
+| `tma1_hook_events` | All 27 CC hook event types (tool calls, subagent lifecycle, session start/end, compaction, permissions, file changes, tasks, etc.) + Codex / Copilot CLI / OpenClaw JSONL parsing. Base DDL in `flows.go`; v1 migration adds `conversation_id` / `permission_mode` / `metadata` (JSON blob); v2 migration adds ingest-side derived columns `tool_file_path` / `tool_command_prefix` / `tool_success` / `tool_error_summary` so anomaly rules can WHERE without re-parsing JSON. 21 columns total. SKIPPING INDEX on `session_id`, INVERTED INDEX on `event_type` / `agent_source`. |
+| `tma1_messages` | Conversation content: user/assistant/thinking messages, tool_use/tool_result. Base DDL in `flows.go`; v1 migration adds `input_tokens` / `output_tokens` / `cache_read_tokens` / `cache_creation_tokens` / `duration_ms`. 13 columns total. FULLTEXT INDEX on `content` (bloom backend, English analyzer) for keyword search via `matches_term()`. |
+| `tma1_anomaly_emits` | One row per anomaly the Detector emitted to an injection channel — the ground-truth feed for the Anomalies dashboard view and the `/api/anomalies/{budget,follow-rate}` validation gates. Created by `InitAnomalyEmitsTable`. DDL in `anomaly_emits.go`. 9 columns: `ts`, `session_id`, `kind`, `severity`, `"channel"`, `evidence`, `suggestion`, `related_files` (JSON array), `first_emitted_at`. |
+| `tma1_build_events` | stdout/stderr/completion events captured by `tma1-server build [--watch] -- <cmd>`. Created by `InitBuildTable`. DDL in `build.go`. 13 columns including FULLTEXT-indexed `"message"`, `exit_code`, `duration_ms`, `"tag"`. |
+| `tma1_external_changes` | File system + git events captured by the git/file sensor; `attribution = agent / human / unknown` set by `HookAttributor` (looks for an Edit/Write/MultiEdit/Bash hook event within ±5 s mentioning the same path). Created by `InitExternalChangesTable`. DDL in `external.go`. 8 columns. |
+| `tma1_project_state` | Latest project structure snapshot (language, build/test system, key files, top-level dirs). Created by `InitProjectStateTable`. DDL in `project.go`. 9 columns including reserved-keyword-quoted `"root"` / `"language"`. Lazy refresh, 24 h TTL gate. |
+| `tma1_schema_version` | Migration ledger: one row per applied `Migration` (version, description, ts). Created on demand by `RunSchemaMigrations`. Internal — not for agent queries. |
+
+REFERENCE.md (`clawhub-skill/tma1/REFERENCE.md`) carries the formal
+column lists + sample queries that get published with the skill.
 
 ## Commands
 
 ```bash
-make build           # Build the binary
+make build           # Build the binary (sync-plugin first → server/internal/hooks/{skills,commands}/ stays canonical with claude-plugin/)
 make build-linux     # Cross-compile for Linux amd64
 make build-windows   # Cross-compile for Windows amd64
 make run             # Build and run locally
-make vet             # Run go vet
-make lint            # Run golangci-lint (requires golangci-lint v2)
+make dev             # Auto-rebuild + restart on .go / .html / .css / .js / .sql change (output piped through scripts/tma1-prettylog when jq is present)
+make install         # Install dev build to $(INSTALL_DIR) — default ~/.tma1/bin — without restarting the running server
+make sync-plugin     # Manually mirror claude-plugin/{skills,commands} → server/internal/hooks/{skills,commands} for go:embed
+make vet             # Run go vet on ./cmd/... ./internal/... ./web
+make lint            # Run golangci-lint v2 on the same selector
 make lint-js         # Run ESLint on dashboard JS (requires Node.js)
-make test            # Run tests with race detector
+make test            # Run tests with race detector on the same selector
 # CI also runs: golangci-lint + ESLint + shellcheck site/public/install.sh + PSScriptAnalyzer on install.ps1
+```
+
+`tma1-server` subcommands (the long-running default has none; subcommand mode is single-shot):
+
+```bash
+tma1-server                                          # default — long-running HTTP + GreptimeDB process manager
+tma1-server mcp-serve                                # JSON-RPC MCP stdio server; spawned by Claude Code per session, talks to the parent's GreptimeDB
+tma1-server install --adapter claude-code|codex [--project DIR] [--dry-run]
+                                                     # wire hooks + MCP + skill + AGENTS.md block; --dry-run previews without writing.
+                                                     # `claude-code` writes to ~/.claude/* + ~/.claude.json + ~/.claude/{skills,commands}/.
+                                                     # `codex`       writes to ~/.codex/{hooks.json,config.toml} + ~/.agents/skills/tma1-peer/.
+tma1-server uninstall --adapter claude-code|codex [--project DIR] [--dry-run] [--purge-data]
+                                                     # reverse of install. --adapter is REQUIRED (no default).
+                                                     # Removes hook registrations, MCP entry, skills, commands, hook script,
+                                                     # and the <!-- tma1:start --> block. --purge-data also wipes
+                                                     # ~/.tma1/data/ and ~/.tma1/bin/. See docs/hooks.md for the full contract.
+tma1-server build [--watch] [--debounce 2s] [--filter-regex PAT [--filter-invert]] \
+                  [--tag NAME] [--project DIR] [--no-color] -- <command> [args...]
+                                                     # wrap a subprocess; tee output to terminal + tma1_build_events
 ```
 
 ## Go conventions
@@ -220,6 +290,13 @@ make test            # Run tests with race detector
 | `TMA1_LLM_PROVIDER` | `anthropic` | LLM provider: `anthropic` or `openai` |
 | `TMA1_LLM_MODEL` | (auto) | Model override (default: `claude-sonnet-4-20250514` / `gpt-4o-mini`) |
 | `TMA1_QUERY_CONCURRENCY` | `4` | Max concurrent SQL queries from dashboard. Lower (e.g. `2`) if GreptimeDB OOMs on 30d. Range `1`–`32`. Hot-reloadable via `/api/settings`. |
+| `TMA1_ADAPTER` | (empty) | **Install-time only** (`install.sh` / `install.ps1`). Set to `claude-code` or `codex` to run `tma1-server install --adapter <name>` after the service is healthy. Both adapters wire the same agent loop (hooks injection + MCP + `/tma1-peer` skill + AGENTS.md block) in each agent's native config shape. |
+| `TMA1_MCP_CALLER` | (empty) | **Install-time only.** Adapter installers write this into each agent's MCP `env` block (`claude_code` / `codex`). The MCP child reads it to drive caller-aware peer-session exclusion so an agent never sees its own sessions on `/tma1-peer`. |
+| `TMA1_DISABLE_INJECTION` | (unset) | Set to `1` to short-circuit `generateInjection` — `/api/hooks` still records events but returns empty stdout. Escape hatch for dogfooding. |
+| `TMA1_ENABLE_FILE_CALLBACK` | (unset) | Set to `1` to refresh `<project_root>/.tma1-context.md` after each hook event. Off by default — MCP / hook injection covers MCP-capable agents; the file is for Aider / Cursor and adds IO + git-sensor self-noise. |
+| `TMA1_DEBUG_POSTTOOLUSE` | (unset) | Set to `1` to emit a debug marker on every PostToolUse hook regardless of anomalies. Plumbing aid. |
+| `TMA1_CONTEXT_PRESSURE_THRESHOLD` | `100000` | Input-token threshold (whole-session sum) for the R-context-pressure anomaly. ≈ 50 % of CC Sonnet 4's 200 k context. |
+| `OPENCLAW_STATE_DIR` | `~/.openclaw` (with `~/.clawdbot` legacy fallback) | Override the OpenClaw session base directory the transcript scanner watches. |
 
 ## Key design decisions
 
@@ -229,6 +306,11 @@ make test            # Run tests with race detector
 4. **No cloud.** All data stays on the user's machine.
 5. **No double-writing.** Flow engine derives metrics from traces. Agent sends OTel once.
 6. **Wide events.** `trace_id` joins spans + conversations. One click from token spike to full dialogue.
+7. **Closing the agent loop (v2).** Observability is one half; the other half is feeding what TMA1 sees back into the agent. Two channels: (a) hook injection — `/api/hooks` is request–response, response body goes straight into the agent's next prompt (or Stop block) for 5 of the 27 registered events; (b) MCP stdio — `tma1-server mcp-serve` exposes 7 perception tools the agent pulls on demand. Anomalies route through `Channel*` constants so the same finding never injects twice. Hook responses are bounded by `hookInjectionTimeout = 300 ms` so a slow GreptimeDB falls back to "no injection" rather than blocking the agent.
+8. **Single-writer SQL surface.** All sensors + the hook handler quote literals through `internal/sqlutil` (`Escape`, `EscapeLike`, `Quote`) and truncate through `internal/strutil.SafeTruncate` (rune-safe). Cross-package SQL drift is the #1 way bad UTF-8 reaches GreptimeDB; consolidating here keeps the fix landing once.
+9. **Versioned schema migrations.** ALTER TABLE additions live in `internal/greptimedb/schema_migrations.go` as a strict-ascending `[]Migration`, applied after the bare CREATE TABLE init. The `tma1_schema_version` ledger records every applied migration so the next start is idempotent without "swallow duplicate-column errors" heuristics.
+10. **Bounded write queue.** `internal/writeq.Sem` caps in-flight background INSERTs against GreptimeDB at 64. Burst paths (subagent storms, replay) can't fork-bomb the process. A panic in any callback is recovered and counted, never crashes the server.
+11. **Concurrent MCP dispatch.** `internal/mcp/server.go` spawns one goroutine per `tools/call`, with writes serialised through a single mutex. A slow tool can't wedge stdin or block other replies; `Run` waits on in-flight goroutines before returning so their responses aren't dropped.
 
 On first start, tma1 writes a default GreptimeDB config to `~/.tma1/config/standalone.toml` and launches GreptimeDB with `-c`. That default keeps HTTP, MySQL, and Prometheus Remote Storage enabled, disables Postgres, InfluxDB, OpenTSDB, and Jaeger, and applies conservative local resource limits.
 
@@ -244,14 +326,41 @@ On first start, tma1 writes a default GreptimeDB config to `~/.tma1/config/stand
 | Flow SQL (aggregations) | `server/internal/greptimedb/flows.sql` |
 | Flow init logic | `server/internal/greptimedb/flows.go` |
 | HTTP routes | `server/internal/handler/handler.go` |
-| Hook event handler | `server/internal/handler/hooks.go` — flexible map parsing, metadata JSON column |
+| Hook event handler | `server/internal/handler/hooks.go` — flexible map parsing, metadata JSON column, `generateInjection` switch routing to `UserPromptSubmit / Stop / PostToolUse / SessionStart / PreCompact` content paths |
+| Anomalies query API | `server/internal/handler/anomalies.go` — `/api/anomalies`, `/api/anomalies/budget`, `/api/anomalies/follow-rate` (reads `tma1_anomaly_emits`, never re-runs the Detector) |
+| Hook telemetry | `server/internal/handler/hook_telemetry.go` — periodic per-event call + inject counter, flushed via slog |
 | SSE streaming + broadcast | `server/internal/handler/sse.go`, `broadcast.go` |
-| Hook script installer | `server/internal/hooks/hooks.go` |
-| Transcript watcher (CC JSONL) | `server/internal/transcript/watcher.go` |
-| Codex session parser | `server/internal/transcript/codex.go` |
+| Perception bundler | `server/internal/perception/bundle.go` — Bundle + Digest + RenderSummaryDelta; `client.go` is the local SQL HTTP client. `Bundler.Caller` (set from `TMA1_MCP_CALLER`) drives peer-session self-exclusion. |
+| Anomaly engine | `server/internal/perception/anomaly.go` — 6 rules, channel routing, 10-min suppression, per-rule resolvers, age-evicted history cache |
+| Anomaly emit log | `server/internal/perception/anomaly_emits.go` — fire-and-forget INSERTs routed through the handler's `writeq.Sem` |
+| Peer-session reader | `server/internal/perception/peer.go` — backs `get_peer_sessions` MCP tool + `/tma1-peer` skill; caller-aware `peerAgentList()` excludes the invoking agent on empty `agent_source` |
+| Project-root resolution | `server/internal/perception/file_writer.go` (`ResolveProjectRoot`) — also writes `.tma1-context.md` for non-MCP agents when `TMA1_ENABLE_FILE_CALLBACK=1` |
+| Incremental injection cache | `server/internal/perception/injection_cache.go` — per-session digest dedupe so identical context isn't re-emitted every turn |
+| MCP stdio server | `server/internal/mcp/server.go` (concurrent loop, write-mutex serialised) + `tools.go` (7 ToolHandlers) + `protocol.go` (JSON-RPC + MCP types) |
+| Build sensor | `server/internal/sensor/build/capture.go` (Runner / LongRunner) + `store.go` (writes `tma1_build_events`) |
+| Git/file sensor | `server/internal/sensor/git/sensor.go` (per-project watcher lifecycle) + `watcher.go` (fsnotify + git poll) + `gitignore.go` + `attribution.go` (agent vs human) + `store.go` |
+| Project sensor | `server/internal/sensor/project/sensor.go` (TTL-gated indexer) + `indexer.go` (marker-file heuristics) + `store.go` |
+| Schema migrations | `server/internal/greptimedb/schema_migrations.go` — `[]Migration` + ledger DDL |
+| Write semaphore | `server/internal/writeq/sem.go` |
+| SQL helpers (single source) | `server/internal/sqlutil/sqlutil.go` |
+| UTF-8 truncation | `server/internal/strutil/strutil.go` |
+| Cross-platform path | `server/internal/pathutil/path.go` |
+| CC adapter installer | `server/internal/hooks/install_cc.go` — atomic writes to `~/.claude/settings.json` + `~/.claude.json`, embedded skill/command tree sync, owner-prefix-scoped stale sweep so user-installed skills/commands are never deleted |
+| Codex adapter installer | `server/internal/hooks/install_codex.go` — atomic writes to `~/.codex/hooks.json` (JSON merge) + `~/.codex/config.toml` (TOML merge via `BurntSushi/toml`), skill drop into `~/.agents/skills/tma1-peer/` |
+| Shared install helpers | `server/internal/hooks/install_shared.go` — `installSink` interface + `writeFileAtomic`, `readJSONFileStrict`, `syncEmbeddedTree`, owner-prefix `removeStaleUnder`, `installInstructions`, `installGitignore`, `tma1BinaryPath`, `expandHome` |
+| CC adapter uninstaller | `server/internal/hooks/uninstall_cc.go` — reverses install_cc.go; refuse-to-overwrite on malformed JSON, half-marker instructions files surfaced as `UninstallReport.Errors` |
+| Codex adapter uninstaller | `server/internal/hooks/uninstall_codex.go` — reverses install_codex.go (TOML merge variant) |
+| Shared uninstall helpers | `server/internal/hooks/uninstall_shared.go` — `unregisterTMA1Hooks` (id + legacy command-path predicate), `removeInstructionsBlock` (half-state refusal), `removeMCPServerEntry`, `UninstallReport` shape |
+| Codex hook stdin/stdout protocol envelope | `server/internal/handler/hooks.go::wrapInjectionEnvelope` — `?envelope=codex` on `/api/hooks` wraps the four string-content events in `hookSpecificOutput.additionalContext`; Stop passes through verbatim (Codex's block shape `{decision,reason}` matches CC's exactly) |
+| Codex live-hook gate | `server/internal/handler/codex_live.go` — in-memory map of Codex sessions actively POSTing hooks; `transcript/codex.go` consults it via `Watcher.IsLiveSession` and skips its own JSONL parse so we don't double-write rows. Now keyed on the Codex conversation UUID (was filename prefix) so hook + JSONL rows actually align. |
+| Hook script installer | `server/internal/hooks/hooks.go` — drops `.sh` / `.ps1` template under `~/.tma1/hooks/` |
+| Hook script templates | `server/internal/hooks/tma1-hook.sh.tmpl` (CC, curl -m 0.5) / `tma1-hook.ps1.tmpl` (CC, Invoke-WebRequest -TimeoutSec 1) / `tma1-hook-codex.sh.tmpl` + `tma1-hook-codex.ps1.tmpl` (Codex variants — POST with `?source=codex&envelope=codex`) |
+| Transcript watcher (CC JSONL) | `server/internal/transcript/watcher.go` — includes `codexParentSession` map so subagent rollout files attribute to the parent run's conversation UUID, not the filename prefix |
+| Codex session parser | `server/internal/transcript/codex.go` — `peekCodexMainUUID` pre-scan + `codexFileContext.effectiveSessionID` resolve to the conversation UUID once `session_meta` is parsed |
 | OpenClaw session parser | `server/internal/transcript/openclaw.go` |
 | Copilot CLI session parser | `server/internal/transcript/copilot_cli.go` — `~/.copilot/session-state/`, session rollover on repeated `session.start`, restart-dedup via DB query |
 | Dashboard UI | `server/web/index.html` |
+| Anomalies view JS | `server/web/js/anomalies.js` — list, severity filter, 10 s auto-refresh, click-to-expand row primitive shared with session detail |
 | Sessions view JS | `server/web/js/sessions.js` — orchestrator (KPI cards, session list, detail loading, search) |
 | Sessions sub-modules | `server/web/js/sessions-{stats,detail,insights,waterfall,timeline}.js` — stats computation, detail overlay, insight panels, waterfall chart, timeline rendering |
 | Agent Canvas animation | `server/web/js/agent-canvas.js` — canvas animation + tool fade-out + subagent lifecycle + compaction/permission events |
@@ -266,7 +375,9 @@ On first start, tma1 writes a default GreptimeDB config to `~/.tma1/config/stand
 | Landing page | `site/src/pages/index.astro` |
 | Install script (Unix) | `site/public/install.sh` |
 | Install script (Windows) | `site/public/install.ps1` |
-| ClawHub skill | `clawhub-skill/tma1/SKILL.md` |
+| ClawHub skill | `clawhub-skill/tma1/SKILL.md` (+ `REFERENCE.md`) — auto-synced to `site/public/` via `site/package.json:prebuild` |
+| v2 long-form docs | `docs/hooks.md`, `docs/mcp-tools.md`, `docs/anomalies.md` |
+| Dev-mode log prettifier | `scripts/tma1-prettylog` — jq pipeline for `make dev` JSON output |
 | CI workflow | `.github/workflows/ci.yml` |
 | Release workflow | `.github/workflows/release.yml` |
 | Site deploy workflow | `.github/workflows/deploy-site.yml` |
@@ -274,20 +385,32 @@ On first start, tma1 writes a default GreptimeDB config to `~/.tma1/config/stand
 ## Verification
 
 ```bash
-# 1. Go: vet + test + build
-cd server && go vet ./... && go test -race -count=1 ./... && CGO_ENABLED=0 go build -o /dev/null ./cmd/tma1-server
+# 1. Go: vet + test + build (use the explicit selector that CI + Makefile both use)
+cd server && go vet ./cmd/... ./internal/... ./web && \
+  go test -race -count=1 ./cmd/... ./internal/... ./web && \
+  CGO_ENABLED=0 go build -o /dev/null ./cmd/tma1-server
 
-# 2. Full binary build
+# 2. Full binary build (also runs sync-plugin so the embedded skill/command tree is fresh)
 make build   # → server/bin/tma1-server
 
-# 3. Dashboard renders (open in browser, check empty states)
+# 3. Dashboard renders (open in browser, check empty states + Anomalies tab)
 open server/web/index.html
 
-# 4. Site: Astro builds
+# 4. Site: Astro builds (prebuild also syncs clawhub-skill/tma1/{SKILL,REFERENCE}.md into site/public/)
 cd site && npm ci && npm run build   # → site/dist/index.html
 
-# 5. Install script: shellcheck clean
+# 5. Install scripts: lint clean
 shellcheck site/public/install.sh
+# (PSScriptAnalyzer on install.ps1 in CI)
+
+# 6. End-to-end smoke for the v2 surface (optional, requires a live tma1-server):
+tma1-server install --adapter claude-code --dry-run   # preview without writing
+tma1-server install --adapter codex --dry-run         # same, for Codex CLI
+tma1-server uninstall --adapter claude-code --dry-run # preview reverse
+curl -s "http://localhost:14318/api/anomalies?limit=10" | jq .
+echo '{"hook_event_name":"UserPromptSubmit","session_id":"smoke","cwd":"'"$PWD"'"}' \
+  | curl -s -X POST -H 'Content-Type: application/json' --data-binary @- \
+    http://localhost:14318/api/hooks    # body = injection content (may be empty)
 ```
 
 ## Explicitly absent (by design)
@@ -297,3 +420,44 @@ shellcheck site/public/install.sh
 - No authentication (local-only tool)
 - No multi-tenant support
 - No TypeScript plugin (SKILL.md + shell is sufficient for MVP)
+
+<!-- tma1:start -->
+## TMA1 Context Layer
+
+TMA1 thickens the Observe step in your reasoning loop. At the start of each
+turn it injects a <tma1-context> block summarising the current session
+(tool history, tokens, current focus, recent files, build state, anomalies).
+Use that block when deciding what to do next.
+
+Example shape (values illustrative):
+
+```
+<tma1-context>
+project: tma1
+session: a1b2c3d4
+duration: 12 min
+tool_calls: 47
+tokens: in=84210 out=312045
+current_focus: .../internal/perception/peer.go
+tools: Bash×18, Edit×12, Read×9, TaskUpdate×4
+recent_files: .../perception/peer.go, .../mcp/tools.go, .../hooks/install_cc.go
+build: make (running)
+build_last_error (6m ago, may have recovered): exit code 1 ...
+external_human_changes: 3
+external_files: .../path/to/file.go
+anomalies:
+  - [MEDIUM] human_modified_during_session — Re-read the listed files before assuming your in-memory copy is current.
+</tma1-context>
+```
+
+Fields are best-effort — most lines only appear when relevant
+(`anomalies` / `build_last_error` / `external_*` only render when there's
+something worth flagging). `current_focus` reflects your most recent
+Edit/Write target.
+
+**You should:**
+- Read the <tma1-context> block (when present) before reasoning about the next action
+- Trust `external_files` over your in-memory snapshot — re-read those before editing
+- Call the MCP tool `get_session_state` if you need a fuller view of your prior tool calls
+- Call `get_context_bundle` after compaction or when context feels stale
+<!-- tma1:end -->

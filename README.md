@@ -40,6 +40,34 @@ Each view gives you:
 
 OpenClaw and OTel GenAI views also have a Security tab (shell commands, prompt injection, webhook errors).
 
+## Closing the agent loop
+
+Observability is one half; the other half is feeding what TMA1 sees back into the agent's reasoning loop so it can do better work next turn. v2 ships two channels for this:
+
+**Push channel — hooks inject context into the agent's prompt stream.** Five hook events are wired to TMA1 — `UserPromptSubmit` prepends a session digest before each turn, `SessionStart` orients a fresh session with prior state and external changes, `PreCompact` carries critical state through context compaction, `PostToolUse` appends per-tool anomaly notes when needed, and `Stop` blocks termination on unresolved high-severity issues. **Claude Code** (`tma1-server install --adapter claude-code`) wires all five into `~/.claude/settings.json`. **Codex** (`tma1-server install --adapter codex`) wires the four that exist in Codex's hook catalogue — `PreCompact` is CC-only — into `~/.codex/hooks.json`. Reverse with `tma1-server uninstall --adapter <name>` whenever you want to back out — surgical removal of hooks, MCP entry, skills, and the `<!-- tma1:start -->` block; user-owned siblings stay intact. The hook script is request–response: it POSTs the event, and whatever the server returns becomes the injection content (raw stdout for CC; wrapped in Codex's `hookSpecificOutput.additionalContext` shape for Codex). Fail-safe: 500 ms client timeout on Unix and 1 s on Windows — both sit above the server-side `hookInjectionTimeout = 300 ms` cap, so a slow path falls back to empty stdout. The agent never blocks on TMA1.
+
+**Pull channel — seven MCP stdio tools the agent can call on demand.** `get_context_bundle` is the aggregate entry point; `get_session_state` returns the full action history; `get_anomalies` lists currently-active issues; `get_external_changes` shows what changed on disk outside the agent; `get_build_status` reports the last build watcher state; `get_project_state` is the static index of the project's structure; `get_peer_sessions` lets one agent read recent sessions from the other agents on the same project (Claude Code ↔ Codex ↔ OpenClaw ↔ Copilot CLI — symmetric). The MCP server is registered in each agent's own config (`~/.claude.json` for CC, `~/.codex/config.toml` `[mcp_servers.tma1]` for Codex) by the adapter installer.
+
+**Anomaly engine.** Six rules run on every Detect, with a per-session 10-minute suppression layer plus resolution checks (e.g. R-stale-view auto-clears when the agent re-reads the modified file). Each anomaly routes to a specific channel — `stop_block` for HIGH-severity build/test issues, `user_prompt_submit` for stale views and human-modified-during-session — so the same finding never injects twice. Three validation gates ship: `/api/anomalies/budget` (≤ 5 emits/kind/day target), `/api/anomalies/follow-rate` (≥ 30% target), and offline precision via the `tma1_anomaly_emits` table.
+
+**Cross-agent collaboration.** Inside Claude Code, `/tma1-peer codex` pulls Codex's most recent session content on the current project and feeds it directly into Claude's context — no copy-paste between terminals. `/tma1-peer copilot 2` works the same way for Copilot CLI; `/tma1-peer` alone returns the latest session from every peer agent.
+
+Setup is one command per agent — both are idempotent:
+
+```bash
+# Claude Code: writes hooks + MCP + /tma1-peer skill + CLAUDE.md/AGENTS.md block.
+curl -fsSL https://tma1.ai/install.sh | TMA1_ADAPTER=claude-code bash
+
+# Codex: writes hooks + MCP + tma1-peer skill + AGENTS.md block in Codex's
+# native config shape (~/.codex/hooks.json, ~/.codex/config.toml,
+# ~/.agents/skills/tma1-peer/).
+curl -fsSL https://tma1.ai/install.sh | TMA1_ADAPTER=codex bash
+```
+
+Stale-sweep is scoped to a `tma1-` owner prefix on both adapters, so personal skills + commands sitting alongside ours in `~/.claude/{skills,commands}/` or `~/.agents/skills/` are never touched. Re-running install only updates files that drifted.
+
+See [docs/mcp-tools.md](docs/mcp-tools.md), [docs/hooks.md](docs/hooks.md), and [docs/anomalies.md](docs/anomalies.md) for the deeper reference.
+
 ![Session Detail](site/public/screenshots/sessions-dark.webp)
 
 ![Cost & Burn Rate](site/public/screenshots/cost-dark.webp)
@@ -52,6 +80,16 @@ curl -fsSL https://tma1.ai/install.sh | bash
 
 # Windows (PowerShell)
 irm https://tma1.ai/install.ps1 | iex
+```
+
+To wire TMA1 into Claude Code (hooks + MCP server + `/tma1-peer` skill) in the same step:
+
+```bash
+# macOS / Linux
+curl -fsSL https://tma1.ai/install.sh | TMA1_ADAPTER=claude-code bash
+
+# Windows
+$env:TMA1_ADAPTER = 'claude-code'; irm https://tma1.ai/install.ps1 | iex
 ```
 
 Or build from source:
@@ -161,6 +199,11 @@ Codex requires separate per-signal endpoints; other agents can use the single `/
 | `/api/evaluate` | GET/POST | LLM prompt evaluation (availability check / single prompt) |
 | `/api/evaluate/summary` | POST | LLM batch summary (sampled prompts) |
 | `/api/settings` | GET/POST | Read/write server settings (LLM config, log level, TTL) |
+| `/api/hooks` | POST | Hook event ingest from agent adapters (Claude Code) — request-response, returns injection content |
+| `/api/hooks/stream` | GET | SSE feed of hook events for the live agent canvas |
+| `/api/anomalies` | GET | Recent anomalies across sessions (`?session_id=` to scope) |
+| `/api/anomalies/budget` | GET | Daily emit count per Kind. 1.7 gate: ≤ 5 / Kind / day |
+| `/api/anomalies/follow-rate` | GET | Did the agent take the suggested action within N tool calls? 1.7 gate: ≥ 30% |
 
 ## Configuration
 
@@ -178,6 +221,9 @@ Codex requires separate per-signal endpoints; other agents can use the single `/
 | `TMA1_LLM_API_KEY` | (empty) | API key for LLM provider (enables prompt evaluation) |
 | `TMA1_LLM_PROVIDER` | `anthropic` | LLM provider: `anthropic` or `openai` |
 | `TMA1_LLM_MODEL` | (auto) | Model override for LLM evaluation |
+| `TMA1_ADAPTER` | (empty) | Set during install to wire an agent (`claude-code`). Idempotent. |
+| `TMA1_DISABLE_INJECTION` | (unset) | When `1`, hook handlers return empty bodies — agent runs without TMA1's push channel |
+| `TMA1_CONTEXT_PRESSURE_THRESHOLD` | `100000` | Token threshold for the `context_pressure` anomaly (default ≈ 50% of Sonnet's 200k window) |
 
 ## Development
 

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,6 +20,9 @@ import (
 	"github.com/tma1-ai/tma1/server/internal/handler"
 	"github.com/tma1-ai/tma1/server/internal/hooks"
 	"github.com/tma1-ai/tma1/server/internal/install"
+	"github.com/tma1-ai/tma1/server/internal/mcp"
+	"github.com/tma1-ai/tma1/server/internal/perception"
+	"github.com/tma1-ai/tma1/server/internal/sensor/build"
 	"github.com/tma1-ai/tma1/server/internal/transcript"
 )
 
@@ -25,6 +30,38 @@ import (
 var Version = "dev"
 
 func main() {
+	// Subcommand routing. The default (no args) runs the full HTTP server.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "mcp-serve":
+			// MCP stdio server. Stdout is reserved for JSON-RPC; logs → stderr.
+			if err := runMCPServe(); err != nil {
+				fmt.Fprintf(os.Stderr, "mcp-serve: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "install":
+			if err := runInstall(os.Args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "install: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "uninstall":
+			if err := runUninstall(os.Args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "uninstall: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "build":
+			exitCode, err := runBuild(os.Args[2:])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "build: %v\n", err)
+				os.Exit(1)
+			}
+			os.Exit(exitCode)
+		}
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("failed to load config", "err", err)
@@ -89,6 +126,34 @@ func main() {
 	// Step 3.1: create session tables (hooks + transcript — no dependency on trace data).
 	if err := greptimedb.InitSessionTables(cfg.GreptimeDBHTTPPort, logger); err != nil {
 		logger.Warn("session table creation failed", "err", err)
+	}
+
+	// Step 3.2: create build sensor table (tma1_build_events).
+	if err := greptimedb.InitBuildTable(cfg.GreptimeDBHTTPPort, logger); err != nil {
+		logger.Warn("build_events table creation failed", "err", err)
+	}
+
+	// Step 3.3: create git/file sensor table (tma1_external_changes).
+	if err := greptimedb.InitExternalChangesTable(cfg.GreptimeDBHTTPPort, logger); err != nil {
+		logger.Warn("external_changes table creation failed", "err", err)
+	}
+
+	// Step 3.4: create project sensor table (tma1_project_state).
+	if err := greptimedb.InitProjectStateTable(cfg.GreptimeDBHTTPPort, logger); err != nil {
+		logger.Warn("project_state table creation failed", "err", err)
+	}
+
+	// Step 3.4.1: create anomaly emit log (drives 1.7 validation gates).
+	if err := greptimedb.InitAnomalyEmitsTable(cfg.GreptimeDBHTTPPort, logger); err != nil {
+		logger.Warn("anomaly_emits table creation failed", "err", err)
+	}
+
+	// Step 3.4.2: apply versioned ALTER TABLE migrations. Replaces the
+	// pre-ledger inline error-tolerant approach (plan risk section
+	// calls for a configVersion-style mechanism). Runs after all
+	// CREATE TABLE init so migrations can target any tma1_* table.
+	if err := greptimedb.RunSchemaMigrations(cfg.GreptimeDBHTTPPort, logger); err != nil {
+		logger.Warn("schema migrations failed; subsequent inserts may fail on missing columns", "err", err)
 	}
 
 	// Step 3.5: check for tma1-server upgrade.
@@ -159,6 +224,10 @@ func main() {
 
 	bc := handler.NewHookBroadcaster()
 	tw := transcript.NewWatcher(cfg.GreptimeDBHTTPPort, logger, bc.Broadcast)
+	// Wire the live-hook gate: when a Codex session is actively
+	// posting hook events to /api/hooks, the JSONL parser skips its
+	// own inserts so we don't double-write the same event.
+	tw.IsLiveSession = handler.IsCodexSessionLive
 	defer tw.StopAll()
 
 	// Start Codex session scanner (discovers ~/.codex/sessions/ JSONL files).
@@ -188,6 +257,9 @@ func main() {
 		QueryConcurrency: cfg.QueryConcurrency,
 		LogLevelVar:      &logLevel,
 	})
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	defer bgCancel()
+	srv.StartBackgroundTasks(bgCtx)
 	httpSrv := &http.Server{
 		Addr:         cfg.Host + ":" + cfg.Port,
 		Handler:      srv.Router(),
@@ -204,6 +276,7 @@ func main() {
 		logger.Info("received signal, shutting down", "signal", sig)
 
 		flowCancel()
+		bgCancel()
 		codexCancel()
 		openclawCancel()
 		copilotCLICancel()
@@ -226,6 +299,450 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("tma1-server stopped")
+}
+
+// runBuild handles `tma1-server build [flags] -- <command> [args...]`.
+//
+// Captures the subprocess's stdout/stderr, tees them to the user's terminal,
+// and writes batched output to tma1_build_events so agents can query build
+// status through perception (get_build_status / get_context_bundle).
+//
+// Flags:
+//
+//	--watch                 run as a long-running watcher with debounced flushes
+//	--debounce 2s           flush interval for --watch (default 2s)
+//	--filter-regex PATTERN  only capture lines matching the regex
+//	--filter-invert         invert the regex match (capture non-matching lines)
+//	--tag NAME              override the short identifier (default: command name)
+//	--project DIR           project label override (default: ResolveProjectRoot(cwd) basename)
+//	--no-color              don't inject FORCE_COLOR / CLICOLOR_FORCE etc.
+//	                        (default: inject so wrapped tools keep ANSI output)
+func runBuild(args []string) (int, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return 1, fmt.Errorf("load config: %w", err)
+	}
+
+	// Parse flags up to `--`.
+	var (
+		watch         bool
+		debounceStr   = "2s"
+		filterRegex   string
+		filterInvert  bool
+		tag           string
+		projectOverride string
+		noColor       bool // default false => ForceColor enabled
+	)
+
+	i := 0
+	for i < len(args) {
+		switch args[i] {
+		case "--watch":
+			watch = true
+			i++
+		case "--debounce":
+			if i+1 >= len(args) {
+				return 1, fmt.Errorf("--debounce requires a value")
+			}
+			debounceStr = args[i+1]
+			i += 2
+		case "--filter-regex":
+			if i+1 >= len(args) {
+				return 1, fmt.Errorf("--filter-regex requires a value")
+			}
+			filterRegex = args[i+1]
+			i += 2
+		case "--filter-invert":
+			filterInvert = true
+			i++
+		case "--tag":
+			if i+1 >= len(args) {
+				return 1, fmt.Errorf("--tag requires a value")
+			}
+			tag = args[i+1]
+			i += 2
+		case "--project":
+			if i+1 >= len(args) {
+				return 1, fmt.Errorf("--project requires a value")
+			}
+			projectOverride = args[i+1]
+			i += 2
+		case "--no-color":
+			noColor = true
+			i++
+		case "--":
+			i++
+			goto runCmd
+		case "-h", "--help":
+			fmt.Println("usage: tma1-server build [flags] -- <command> [args...]")
+			fmt.Println("flags: --watch --debounce 2s --filter-regex PAT --filter-invert --tag NAME --project DIR --no-color")
+			return 0, nil
+		default:
+			// Treat the first non-flag positional as the start of the command.
+			goto runCmd
+		}
+	}
+
+runCmd:
+	cmdArgs := args[i:]
+	if len(cmdArgs) == 0 {
+		return 1, fmt.Errorf("no command provided after --")
+	}
+
+	debounce, err := time.ParseDuration(debounceStr)
+	if err != nil {
+		return 1, fmt.Errorf("--debounce: %w", err)
+	}
+
+	filter, err := build.RegexFilter(filterRegex, filterInvert)
+	if err != nil {
+		return 1, err
+	}
+
+	project := projectOverride
+	if project == "" {
+		cwd, _ := os.Getwd()
+		root := perception.ResolveProjectRoot(cwd)
+		project = filepath.Base(root)
+	}
+
+	// Ensure tma1_build_events exists. Idempotent; cheap; lets a fresh user
+	// run `tma1-server build` standalone without waiting for the long-running
+	// tma1-server to have created it first.
+	if err := greptimedb.InitBuildTable(cfg.GreptimeDBHTTPPort,
+		slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+		fmt.Fprintf(os.Stderr, "tma1 build: warning: could not ensure table: %v\n", err)
+	}
+
+	store := build.NewGreptimeStore(cfg.GreptimeDBHTTPPort)
+	bcfg := build.Config{
+		Project:    project,
+		Command:    strings.Join(cmdArgs, " "),
+		Tag:        tag,
+		Filter:     filter,
+		ForceColor: !noColor,
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	if watch {
+		result, err := build.NewLongRunner(store, bcfg, debounce).Run(ctx, cmdArgs)
+		if err != nil {
+			return 1, err
+		}
+		return result.ExitCode, nil
+	}
+	result, err := build.NewRunner(store, bcfg).Run(ctx, cmdArgs)
+	if err != nil {
+		return 1, err
+	}
+	return result.ExitCode, nil
+}
+
+// runInstall handles `tma1-server install [--adapter claude-code] [--project DIR] [--dry-run]`.
+// Prints a human-readable report to stdout.
+//
+// --dry-run shows what would change without touching disk; intended for
+// users wary of an installer that writes to ~/.claude.json (OAuth tokens
+// live there). Every file write inside the installer routes through a
+// single sink that respects this flag.
+func runInstall(args []string) error {
+	adapter := "claude-code"
+	project, _ := os.Getwd()
+	dryRun := false
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--adapter":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--adapter needs a value")
+			}
+			adapter = args[i+1]
+			i++
+		case "--project":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--project needs a value")
+			}
+			project = args[i+1]
+			i++
+		case "--dry-run", "-n":
+			dryRun = true
+		case "-h", "--help":
+			fmt.Println("usage: tma1-server install [--adapter claude-code|codex] [--project DIR] [--dry-run]")
+			return nil
+		default:
+			return fmt.Errorf("unknown flag %q", args[i])
+		}
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	port := 14318
+	if p, err := strconv.Atoi(cfg.Port); err == nil {
+		port = p
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	// adapterInstaller is the surface runInstall needs from each
+	// per-adapter installer. ClaudeCodeInstaller + CodexInstaller both
+	// implement it; both Install() returns the same report shape.
+	type adapterInstaller interface {
+		Install() (hooks.InstallReport, error)
+	}
+
+	var inst adapterInstaller
+	switch adapter {
+	case "claude-code":
+		inst = &hooks.ClaudeCodeInstaller{
+			DataDir:            cfg.DataDir,
+			Port:               port,
+			GreptimeDBHTTPPort: cfg.GreptimeDBHTTPPort,
+			ProjectDir:         project,
+			Logger:             logger,
+			DryRun:             dryRun,
+		}
+	case "codex":
+		inst = &hooks.CodexInstaller{
+			DataDir:            cfg.DataDir,
+			Port:               port,
+			GreptimeDBHTTPPort: cfg.GreptimeDBHTTPPort,
+			ProjectDir:         project,
+			Logger:             logger,
+			DryRun:             dryRun,
+		}
+	default:
+		return fmt.Errorf("adapter %q not supported (available: claude-code, codex)", adapter)
+	}
+	rep, installErr := inst.Install()
+
+	if dryRun {
+		fmt.Printf("TMA1 install report (adapter=%s, DRY-RUN — no files touched)\n", adapter)
+	} else {
+		fmt.Printf("TMA1 install report (adapter=%s)\n", adapter)
+	}
+	fmt.Printf("  Hook script:   %s\n", rep.HookScript)
+	fmt.Printf("  Settings:      %s\n", rep.SettingsPath)
+	if rep.InstructionsPath != "" {
+		fmt.Printf("  Instructions:  %s\n", rep.InstructionsPath)
+	}
+	if rep.GitignorePath != "" {
+		fmt.Printf("  .gitignore:    %s\n", rep.GitignorePath)
+	}
+	if rep.MCPConfigPath != "" {
+		fmt.Printf("  MCP config:    %s\n", rep.MCPConfigPath)
+	}
+	if len(rep.SkillPaths) > 0 {
+		fmt.Println("  Skills:")
+		for _, p := range rep.SkillPaths {
+			fmt.Printf("    - %s\n", p)
+		}
+	}
+	if len(rep.CommandPaths) > 0 {
+		fmt.Println("  Commands:")
+		for _, p := range rep.CommandPaths {
+			fmt.Printf("    - %s\n", p)
+		}
+	}
+	if len(rep.Changed) == 0 {
+		fmt.Println("  No changes (already installed).")
+	} else {
+		header := "  Changed:"
+		if dryRun {
+			header = "  Would change:"
+		}
+		fmt.Println(header)
+		for _, c := range rep.Changed {
+			fmt.Printf("    - %s\n", c)
+		}
+	}
+	if installErr != nil {
+		return installErr
+	}
+	return nil
+}
+
+// runUninstall reverses runInstall: it removes the hook script, hook
+// registrations, MCP server entry, embedded skills/commands, and the
+// project-level instruction block written by the matching adapter.
+// The `.gitignore` line and `~/.tma1/data/` are left alone unless the
+// user passes `--purge-data`.
+//
+// --adapter is required (no default): the asymmetric blast radius of
+// "uninstall the wrong side" outweighs the convenience of a guess.
+func runUninstall(args []string) error {
+	adapter := ""
+	project, _ := os.Getwd()
+	dryRun := false
+	purgeData := false
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--adapter":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--adapter needs a value")
+			}
+			adapter = args[i+1]
+			i++
+		case "--project":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--project needs a value")
+			}
+			project = args[i+1]
+			i++
+		case "--dry-run", "-n":
+			dryRun = true
+		case "--purge-data":
+			purgeData = true
+		case "-h", "--help":
+			fmt.Println("usage: tma1-server uninstall --adapter claude-code|codex [--project DIR] [--dry-run] [--purge-data]")
+			return nil
+		default:
+			return fmt.Errorf("unknown flag %q", args[i])
+		}
+	}
+	if adapter == "" {
+		return fmt.Errorf("--adapter is required (claude-code|codex)")
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	type adapterUninstaller interface {
+		Uninstall() (hooks.UninstallReport, error)
+	}
+	var unin adapterUninstaller
+	switch adapter {
+	case "claude-code":
+		unin = &hooks.ClaudeCodeUninstaller{
+			DataDir:    cfg.DataDir,
+			ProjectDir: project,
+			Logger:     logger,
+			DryRun:     dryRun,
+			PurgeData:  purgeData,
+		}
+	case "codex":
+		unin = &hooks.CodexUninstaller{
+			DataDir:    cfg.DataDir,
+			ProjectDir: project,
+			Logger:     logger,
+			DryRun:     dryRun,
+			PurgeData:  purgeData,
+		}
+	default:
+		return fmt.Errorf("adapter %q not supported (available: claude-code, codex)", adapter)
+	}
+
+	rep, uninstallErr := unin.Uninstall()
+
+	if dryRun {
+		fmt.Printf("TMA1 uninstall report (adapter=%s, DRY-RUN — no files touched)\n", adapter)
+	} else {
+		fmt.Printf("TMA1 uninstall report (adapter=%s)\n", adapter)
+	}
+	if rep.HookScript != "" {
+		fmt.Printf("  Hook script:   %s\n", rep.HookScript)
+	}
+	if rep.SettingsPath != "" {
+		fmt.Printf("  Settings:      %s\n", rep.SettingsPath)
+	}
+	if rep.MCPConfigPath != "" {
+		fmt.Printf("  MCP config:    %s\n", rep.MCPConfigPath)
+	}
+	for _, p := range rep.InstructionsPaths {
+		fmt.Printf("  Instructions:  %s\n", p)
+	}
+	if rep.GitignorePath != "" {
+		fmt.Printf("  .gitignore:    %s\n", rep.GitignorePath)
+	}
+	if len(rep.Removed) > 0 {
+		header := "  Removed:"
+		if dryRun {
+			header = "  Would remove:"
+		}
+		fmt.Println(header)
+		for _, r := range rep.Removed {
+			fmt.Printf("    - %s\n", r)
+		}
+	}
+	if len(rep.Skipped) > 0 {
+		fmt.Println("  Skipped:")
+		for _, s := range rep.Skipped {
+			fmt.Printf("    - %s\n", s)
+		}
+	}
+	if len(rep.Errors) > 0 {
+		fmt.Fprintln(os.Stderr, "  Errors (file left untouched):")
+		for _, e := range rep.Errors {
+			fmt.Fprintf(os.Stderr, "    - %s\n", e)
+		}
+	}
+	if len(rep.Removed) == 0 && len(rep.Errors) == 0 {
+		fmt.Println("  Nothing to remove (already uninstalled or never installed).")
+	}
+
+	// Hint about the still-running server. Don't pkill it — that's
+	// outside the config-management contract.
+	if !dryRun && len(rep.Removed) > 0 {
+		fmt.Fprintln(os.Stderr, "  Note: tma1-server may still be running. Stop it with `pkill tma1-server` if you no longer need the dashboard.")
+	}
+
+	if uninstallErr != nil {
+		return uninstallErr
+	}
+	if rep.HasErrors() {
+		return fmt.Errorf("%d file(s) needed operator review", len(rep.Errors))
+	}
+	return nil
+}
+
+// runMCPServe handles the `tma1-server mcp-serve` subcommand. Claude Code
+// spawns this once per session to talk MCP over stdio. The function MUST NOT
+// write anything to stdout that isn't a JSON-RPC frame.
+//
+// mcp-serve does NOT start GreptimeDB — it connects to the running parent
+// tma1-server's GreptimeDB on cfg.GreptimeDBHTTPPort (default 14000).
+func runMCPServe() error {
+	mcp.ServerVersion = Version
+
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	// Logger writes to stderr — stdout is owned by the JSON-RPC stream.
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+
+	bundler := perception.NewBundler(cfg.GreptimeDBHTTPPort, logger)
+	// Caller comes from the env var the install adapter wrote into each
+	// agent's MCP config (claude_code for CC, codex for Codex, etc).
+	// GetPeerSessions uses it to exclude the caller from the empty-
+	// agent_source fan-out.
+	bundler.Caller = os.Getenv("TMA1_MCP_CALLER")
+
+	srv := mcp.NewServer(logger,
+		mcp.ContextBundleTool{Bundler: bundler},
+		mcp.SessionStateTool{Bundler: bundler},
+		mcp.AnomaliesTool{Bundler: bundler},
+		mcp.BuildStatusTool{Bundler: bundler},
+		mcp.ExternalChangesTool{Bundler: bundler},
+		mcp.ProjectStateTool{Bundler: bundler},
+		mcp.PeerSessionsTool{Bundler: bundler},
+	)
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	return srv.Run(ctx)
 }
 
 func readVersionFile(path string) string {

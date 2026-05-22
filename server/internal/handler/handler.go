@@ -2,6 +2,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,7 +16,11 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/tma1-ai/tma1/server/internal/perception"
+	"github.com/tma1-ai/tma1/server/internal/sensor/git"
+	"github.com/tma1-ai/tma1/server/internal/sensor/project"
 	"github.com/tma1-ai/tma1/server/internal/transcript"
+	"github.com/tma1-ai/tma1/server/internal/writeq"
 )
 
 // Server holds shared state for all HTTP handlers.
@@ -29,6 +34,13 @@ type Server struct {
 	llmClient         *http.Client
 	transcriptWatcher *transcript.Watcher
 	hookBroadcast     *HookBroadcaster
+	bundler           *perception.Bundler
+	fileWriter        *perception.FileWriter
+	injectionCache    *perception.InjectionCache
+	hookTelemetry     *hookTelemetry
+	gitSensor         *git.Sensor
+	projectSensor     *project.Sensor
+	writeSem          *writeq.Sem
 	llmConfig         LLMConfig
 	mu                sync.RWMutex
 	dataDir           string
@@ -50,7 +62,30 @@ func New(greptimeHTTPPort int, tma1Port string, webFS http.FileSystem, logger *s
 	if bc == nil {
 		bc = NewHookBroadcaster()
 	}
-	return &Server{
+	// Port 0 is the "no GreptimeDB" sentinel used by tests: skip both the
+	// bundler (no live queries) and the async hook-event INSERTs (no DB
+	// pollution). All production callers pass a real port.
+	var bundler *perception.Bundler
+	var fileWriter *perception.FileWriter
+	var gitSensor *git.Sensor
+	var projectSensor *project.Sensor
+	if greptimeHTTPPort > 0 {
+		bundler = perception.NewBundler(greptimeHTTPPort, logger)
+		fileWriter = perception.NewFileWriter(bundler)
+		gitSensor = git.NewSensor(
+			git.NewGreptimeStore(greptimeHTTPPort),
+			git.NewHookAttributor(greptimeHTTPPort),
+			logger,
+		)
+		projectSensor = project.NewSensor(project.NewGreptimeStore(greptimeHTTPPort), logger)
+	}
+	// 64 in-flight background writes — enough for a subagent storm,
+	// small enough that a stuck GreptimeDB can't fork-bomb us. Use
+	// the server's structured logger so recovered panics in background
+	// writes show up in the same JSON stream as the rest of the
+	// process, not via slog.Default().
+	writeSem := writeq.NewWithLogger(64, logger)
+	srv := &Server{
 		greptimeHTTPPort:  greptimeHTTPPort,
 		tma1Port:          tma1Port,
 		logger:            logger,
@@ -60,12 +95,39 @@ func New(greptimeHTTPPort int, tma1Port string, webFS http.FileSystem, logger *s
 		llmClient:         &http.Client{Timeout: 90 * time.Second},
 		transcriptWatcher: tw,
 		hookBroadcast:     bc,
+		bundler:           bundler,
+		fileWriter:        fileWriter,
+		injectionCache:    perception.NewInjectionCache(time.Hour),
+		hookTelemetry:     newHookTelemetry(logger),
+		gitSensor:         gitSensor,
+		projectSensor:     projectSensor,
+		writeSem:          writeSem,
 		llmConfig:         llm,
 		dataDir:           sc.DataDir,
 		dataTTL:           sc.DataTTL,
 		queryConcurrency:  clampQueryConcurrency(sc.QueryConcurrency),
 		logLevelVar:       sc.LogLevelVar,
 	}
+	// Route Detector emit-log INSERTs through the same semaphore so
+	// hook handlers and anomaly emits share a single capacity budget
+	// against GreptimeDB.
+	if bundler != nil {
+		bundler.Detector().SetSubmit(writeSem.Go)
+	}
+	return srv
+}
+
+// StartBackgroundTasks launches long-running goroutines owned by the Server
+// (hook telemetry flush loop, git sensor watcher manager, future periodic
+// jobs). It returns immediately; goroutines stop when ctx is canceled.
+func (s *Server) StartBackgroundTasks(ctx context.Context) {
+	if s.hookTelemetry != nil {
+		go s.hookTelemetry.run(ctx)
+	}
+	if s.gitSensor != nil {
+		s.gitSensor.Start(ctx)
+	}
+	go s.runFileChangedDedupGC(ctx)
 }
 
 // Router returns the chi router with all routes registered.
@@ -88,6 +150,15 @@ func (s *Server) Router() http.Handler {
 	// Hook events from Claude Code / Codex.
 	r.Post("/api/hooks", s.handleHooks)
 	r.Get("/api/hooks/stream", s.handleHookStream)
+
+	// Anomalies aggregation for the dashboard's Anomalies tab.
+	r.Get("/api/anomalies", s.handleAnomaliesQuery)
+	// Phase 1.7 validation: daily emit count per anomaly Kind, drawn
+	// from tma1_anomaly_emits. Lets Dennis check the 5/day gate.
+	r.Get("/api/anomalies/budget", s.handleAnomaliesBudget)
+	// Phase 1.7 validation: did the agent take the suggested action
+	// within N tool calls of each emit? Drives the 30% follow-rate gate.
+	r.Get("/api/anomalies/follow-rate", s.handleAnomaliesFollowRate)
 
 	// Prompt evaluation (LLM-as-judge) — origin-checked to prevent CSRF.
 	r.HandleFunc("/api/evaluate", s.requireLocalOrigin(s.handleEvaluate))
