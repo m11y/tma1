@@ -465,13 +465,6 @@ func (b *Bundler) enrichPeerSession(ctx context.Context, ps *PeerSession, messag
 	wg.Wait()
 }
 
-// peerAgentList returns the validPeerAgents set with the Bundler's
-// Caller removed and sorted alphabetically for deterministic output.
-// When Caller is empty (long-running HTTP API path with no fixed
-// caller identity), all four agents are returned.
-//
-// Extracted to a method so the caller-aware exclusion has a unit-test
-// foothold without standing up a fake SQL backend.
 // clampPeerLimit constrains the per-agent session limit into [1, 5].
 // Out-of-range inputs are clamped to the nearest boundary rather than
 // silently defaulting to 1 — `/tma1-peer codex 10` should yield 5
@@ -487,6 +480,13 @@ func clampPeerLimit(n int) int {
 	return n
 }
 
+// peerAgentList returns the validPeerAgents set with the Bundler's
+// Caller removed and sorted alphabetically for deterministic output.
+// When Caller is empty (long-running HTTP API path with no fixed
+// caller identity), all four agents are returned.
+//
+// Extracted to a method so the caller-aware exclusion has a unit-test
+// foothold without standing up a fake SQL backend.
 func (b *Bundler) peerAgentList() []string {
 	agents := make([]string, 0, len(validPeerAgents))
 	for a := range validPeerAgents {

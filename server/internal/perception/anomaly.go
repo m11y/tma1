@@ -104,10 +104,17 @@ func NewDetector(httpPort int, logger *slog.Logger) *Detector {
 //
 // Only call Detect from PUSH-CHANNEL paths (hook handlers driving
 // UserPromptSubmit / Stop / PreCompact / etc.). Pull-channel paths
-// (MCP `get_anomalies`, dashboard `/api/anomalies`) MUST read
-// tma1_anomaly_emits directly via Bundler.ListEmittedAnomalies — a
-// pull call that consumes suppression silently weakens the next real
-// Stop block.
+// must use one of two side-effect-free alternatives, picked by intent:
+//   - Current active anomalies ("what would the next hook surface?") →
+//     DetectPreview. Runs the rules + resolvers but never writes
+//     sessHistory or the emit log. Used by MCP `get_anomalies`.
+//   - Past emitted history ("what has been told to agents already?") →
+//     Bundler.ListEmittedAnomalies. Reads tma1_anomaly_emits directly.
+//     Used by the dashboard `/api/anomalies` endpoint.
+//
+// Calling Detect from a pull path consumes suppression silently and
+// weakens the next real Stop block — that's the bug both alternatives
+// exist to prevent.
 func (d *Detector) Detect(ctx context.Context, sessionID string) []Anomaly {
 	if strings.TrimSpace(sessionID) == "" {
 		return nil

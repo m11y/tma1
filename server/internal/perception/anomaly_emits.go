@@ -15,10 +15,15 @@ import (
 // free: it issues a read-only SELECT and never advances the suppression
 // window or writes to the emit log.
 //
-// Pull-channel callers (the MCP `get_anomalies` tool, the dashboard's
-// `/api/anomalies` poll) MUST use this instead of Detector.Detect. The
-// HTTP handler already follows this rule with an inline query; this
-// method gives the MCP path the same guarantee.
+// This is the "past emitted history" path: callers wanting to show
+// what has ALREADY been emitted to agents (dashboard `/api/anomalies`
+// and any other history surface) should use this. The HTTP handler
+// follows the same shape with its inline SELECT.
+//
+// NOT the right method for "current active anomalies" — MCP
+// `get_anomalies` uses Detector.DetectPreview for that (it re-runs the
+// rules + resolvers read-only). Don't conflate the two: ListEmitted
+// returns history, DetectPreview returns the next-hook view.
 //
 // Empty sessionID returns nil. limit ≤ 0 defaults to 50; values above
 // 500 are clamped (matches the dashboard handler's bounds).

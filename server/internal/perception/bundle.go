@@ -61,7 +61,10 @@ func NewBundler(httpPort int, logger *slog.Logger) *Bundler {
 // Pull-channel callers (MCP tools, dashboard polls) MUST NOT call
 // Detector.Detect — that mutates the suppression window and writes to
 // the emit log, which silently weakens the Stop-block guarantee for
-// the next hook. Use ListEmittedAnomalies instead.
+// the next hook. Use one of:
+//   - DetectPreview for "current active anomalies" (MCP get_anomalies)
+//   - ListEmittedAnomalies for "past emitted history" (dashboard
+//     /api/anomalies and any other history surface)
 func (b *Bundler) Detector() *Detector { return b.detector }
 
 // DetectPreview returns the current active anomaly set for sessionID
