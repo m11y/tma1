@@ -76,7 +76,7 @@ serves the dashboard from the same `tma1-server` process.
 The easiest path is to let the agent read the setup skill:
 
 ```text
-Read https://tma1.ai/SKILL.md and follow the instructions to install and configure TMA1 for your AI agent
+Read https://tma1.ai/SKILL.md and follow the instructions to install or upgrade TMA1 for your AI agent
 ```
 
 To wire adapters during install:
@@ -175,13 +175,27 @@ Use the build wrapper when you want TMA1 to capture dev/test output and feed
 fresh failures back to the agent:
 
 ```bash
-tma1-server build --tag npm -- npm run dev
-tma1-server build --watch --tag test -- make test
+tma1 build --tag npm -- npm run dev
+tma1 build --watch --tag test -- make test
+tma1 build --filter-regex '^error|FAIL' -- pytest -v
 ```
 
-The build sensor writes to `tma1_build_events`. Anomaly rules can then tell
-the agent to stop retrying the same failing command and fix the current
-error first.
+The build sensor writes to `tma1_build_events`. Anomaly rules
+(`repeated_failed_build`, `build_broken_after_my_edit`) read this table
+to tell the agent to stop retrying the same failing command and fix the
+current error first.
+
+Supported flags:
+
+| Flag | Purpose |
+|------|---------|
+| `--watch` | Re-run the wrapped command when files change |
+| `--debounce DUR` | Coalesce filesystem events while watching (default `2s`) |
+| `--tag NAME` | Tag this build run so the dashboard can group it (e.g. `npm`, `pytest`) |
+| `--filter-regex PAT` | Only capture lines matching the pattern |
+| `--filter-invert` | Invert the filter — capture lines NOT matching the pattern |
+| `--no-color` | Strip ANSI color codes from captured output |
+| `--project DIR` | Override the project directory used for scoping (default: cwd) |
 
 ## OTLP Endpoints
 

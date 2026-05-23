@@ -7,7 +7,7 @@ interface Props {
 
 const { t } = Astro.props;
 const lang = t.lang;
-const onboardingCmd = 'Read https://tma1.ai/SKILL.md and follow the instructions to install and configure TMA1 for your AI agent';
+const onboardingCmd = 'Read https://tma1.ai/SKILL.md and follow the instructions to install or upgrade TMA1 for your AI agent';
 const curlCmd = 'curl -fsSL https://tma1.ai/install.sh | bash';
 const psCmd = 'irm https://tma1.ai/install.ps1 | iex';
 
@@ -102,7 +102,7 @@ const showcase: ShowcaseEntry[] = [
     <div class="onboarding-card">
       <p class="onboarding-label">{t.onboarding.label}</p>
       <div class="onboarding-body">
-        <p class="onboarding-text">Read <a href="https://tma1.ai/SKILL.md">https://tma1.ai/SKILL.md</a> and follow the instructions to install and configure TMA1 for your AI agent</p>
+        <p class="onboarding-text">Read <a href="https://tma1.ai/SKILL.md">https://tma1.ai/SKILL.md</a> and follow the instructions to install or upgrade TMA1 for your AI agent</p>
         <button class="copy-btn"
           onclick={`navigator.clipboard.writeText('${onboardingCmd}').then(()=>{this.textContent='${t.ui.copied}';setTimeout(()=>this.textContent='${t.ui.copy}',1500)})`}>
           {t.ui.copy}
