@@ -61,3 +61,31 @@ func TestWriteFileAtomicNewFile(t *testing.T) {
 		t.Errorf("target content = %q, want %q", got, "hello\n")
 	}
 }
+
+// TestWriteFileAtomicPreservesExistingMode guards Copilot's review
+// finding: os.WriteFile only applied perm on first create, so a user
+// who chmod'd .tma1-context.md to a custom mode expected that to
+// stick across updates. The previous implementation forced perm on
+// every write, silently undoing the user's chmod.
+func TestWriteFileAtomicPreservesExistingMode(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "perms.md")
+	if err := os.WriteFile(target, []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o600); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	if err := writeFileAtomic(target, []byte("v2\n"), 0o644); err != nil {
+		t.Fatalf("writeFileAtomic: %v", err)
+	}
+
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("mode after update = %v, want 0o600 (user chmod preserved)", got)
+	}
+}

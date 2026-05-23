@@ -61,6 +61,14 @@ func writeFileAtomic(target string, data []byte, perm os.FileMode) error {
 	if resolved, err := filepath.EvalSymlinks(target); err == nil {
 		target = resolved
 	}
+	// Preserve an existing target's mode rather than forcing perm on
+	// every update — os.WriteFile only applied perm on first create, so
+	// a user who chmod'd .tma1-context.md to 0600 expects that to stick.
+	// On a fresh write the supplied perm is used.
+	effectivePerm := perm
+	if info, err := os.Stat(target); err == nil {
+		effectivePerm = info.Mode().Perm()
+	}
 	dir := filepath.Dir(target)
 	f, err := os.CreateTemp(dir, ".tma1-context-*.tmp")
 	if err != nil {
@@ -77,7 +85,7 @@ func writeFileAtomic(target string, data []byte, perm os.FileMode) error {
 		_ = f.Close()
 		return err
 	}
-	if err := f.Chmod(perm); err != nil {
+	if err := f.Chmod(effectivePerm); err != nil {
 		_ = f.Close()
 		return err
 	}

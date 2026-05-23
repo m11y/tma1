@@ -138,9 +138,12 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) handle(ctx context.Context, req Request) {
-	// A request without "id" is a notification — no response is ever sent,
-	// regardless of method. Side effects still execute (currently none of
-	// our methods has any to retain in that case).
+	// A request without "id" is a notification per JSON-RPC 2.0 — no
+	// response is sent and the method body isn't executed either. None
+	// of the methods we expose has notification-relevant side effects
+	// (initialize/tools.list/tools.call/ping are all idempotent reads
+	// or queries), so dropping the whole frame is the correct behaviour.
+	// Revisit only if a future method needs to act on a notification.
 	if !req.HasID() {
 		return
 	}
