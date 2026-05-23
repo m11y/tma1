@@ -458,10 +458,12 @@ func TestProcessCodexResponseItemEmitsToolMessages(t *testing.T) {
 }
 
 // TestProcessCodexWebSearchEndEmitsToolMessages pins the projection of
-// a single Codex web_search_end event to a PreToolUse + PostToolUse
-// hook pair plus matching tool_use / tool_result message rows, so the
-// existing tool-pair waterfall + transcript renderers light up without
-// needing a Codex-specific branch.
+// a single Codex web_search_end event: PreToolUse + PostToolUse hook
+// pair (so the waterfall draws the tool span) plus ONE tool_use
+// message for the input. We deliberately do NOT write a tool_result
+// message — Codex's web_search_end carries the query/action but no
+// results payload, and emitting `tool_input` as `tool_result` would
+// inflate context-length heuristics keyed off result length.
 func TestProcessCodexWebSearchEndEmitsToolMessages(t *testing.T) {
 	sqlCh := make(chan string, 4)
 	ts := httptest.NewServer(httpTestHandler(sqlCh))
@@ -486,12 +488,24 @@ func TestProcessCodexWebSearchEndEmitsToolMessages(t *testing.T) {
 		waitForSQL(t, sqlCh),
 		waitForSQL(t, sqlCh),
 		waitForSQL(t, sqlCh),
-		waitForSQL(t, sqlCh),
 	}
 	assertAnySQLContains(t, sqls, "tma1_hook_events", "PreToolUse", "web_search", "ws-1", "xdisp cursor")
-	assertAnySQLContains(t, sqls, "tma1_hook_events", "PostToolUse", "web_search", "ws-1", "xdisp cursor")
+	assertAnySQLContains(t, sqls, "tma1_hook_events", "PostToolUse", "web_search", "ws-1")
 	assertAnySQLContains(t, sqls, "tma1_messages", "tool_use", "web_search", "ws-1", "gpt-5.5")
-	assertAnySQLContains(t, sqls, "tma1_messages", "tool_result", "web_search", "ws-1", "gpt-5.5")
+
+	// No tool_result row should land for web_search.
+	for _, sql := range sqls {
+		if strings.Contains(sql, "tma1_messages") && strings.Contains(sql, "tool_result") {
+			t.Fatalf("expected no tool_result message for web_search_end, got %s", sql)
+		}
+	}
+
+	// No 4th insert (only 3 total).
+	select {
+	case sql := <-sqlCh:
+		t.Fatalf("expected exactly 3 inserts for web_search_end, got extra: %s", sql)
+	case <-time.After(150 * time.Millisecond):
+	}
 }
 
 // TestProcessCodexResponseItemEmitsReasoningSummary locks in the
@@ -557,7 +571,10 @@ func TestProcessCodexTokenCountWritesUsageRow(t *testing.T) {
 	sql := waitForSQL(t, sqlCh)
 	for _, want := range []string{
 		"tma1_messages",
-		"'assistant', 'assistant'",
+		// 'usage' message_type is dedicated for synthetic per-call
+		// usage rows so the timeline can drop them by type instead
+		// of an empty-content heuristic.
+		"'usage', 'assistant'",
 		"'gpt-5.5'",
 		"37347", "1549", "34688", "516",
 	} {

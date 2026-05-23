@@ -308,15 +308,19 @@ async function sess_loadDetail(sessionId, agentSource) {
     }
   }
   // Messages: skip tool_use/tool_result if already covered by a hook-based tool pair.
-  // Also skip the synthetic empty-content assistant rows the Codex
-  // parser writes (insertCodexModelMessage to carry model name into
-  // KPI lookup, insertCodexUsageMessage to carry per-call usage into
-  // the apiCalls fallback). They have no displayable transcript text;
-  // letting them render produces blank assistant entries — one per
-  // Codex turn for the usage row, ~80+ per active session.
+  // Skip the synthetic 'usage' rows the Codex parser writes
+  // (insertCodexModelMessage to carry model name into the KPI lookup,
+  // insertCodexUsageMessage to carry per-call token usage into the
+  // apiCalls fallback). They have no displayable content; the
+  // dedicated message_type lets us drop them by type instead of an
+  // empty-content heuristic that could mis-fire on real data.
+  // Legacy fallback: pre-rename data wrote synthetic rows as
+  // message_type='assistant' with empty content — also drop those
+  // so old sessions stay clean.
   for (var mi = 0; mi < messages.length; mi++) {
     var msg = messages[mi];
     if ((msg.message_type === 'tool_use' || msg.message_type === 'tool_result') && msg.tool_use_id && pairedIds[msg.tool_use_id]) continue;
+    if (msg.message_type === 'usage') continue;
     if (msg.message_type === 'assistant' && !(msg.content && msg.content.length) && !msg.tool_use_id) continue;
     timeline.push({ ts: tsToMs(msg.ts), source: 'message', data: msg });
   }
@@ -347,14 +351,14 @@ async function sess_loadDetail(sessionId, agentSource) {
       }
     }
     if (apiCalls.length === 0) {
-      // JSONL fallback. insertCodexUsageMessage writes one row per
-      // Codex token_count event with input/output/cache/reasoning
-      // populated; insertCodexModelMessage writes a model-only row
-      // with every token column NULL. The > 0 guard below skips
+      // JSONL fallback. insertCodexUsageMessage writes one 'usage' row
+      // per Codex token_count event with input/output/cache/reasoning
+      // populated; insertCodexModelMessage writes a model-only 'usage'
+      // row with every token column NULL. The > 0 guard below skips
       // the latter so model-only rows never become spurious calls.
       for (var ci = 0; ci < messages.length; ci++) {
         var cm = messages[ci];
-        if (cm.message_type !== 'assistant') continue;
+        if (cm.message_type !== 'usage') continue;
         var cIn = Number(cm.input_tokens) || 0;
         var cOut = Number(cm.output_tokens) || 0;
         var cReasoning = Number(cm.reasoning_tokens) || 0;

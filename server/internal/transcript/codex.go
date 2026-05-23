@@ -471,15 +471,19 @@ func (w *Watcher) processCodexLine(sessionID, line string, seen map[string]struc
 				w.insertCodexHookEvent(sid, ts, "SubagentStop", "", "", "", "", fctx)
 			}
 		case "web_search_end":
-			// Codex emits a single event for the whole search; project
-			// it as a Pre/Post pair AND a tool_use/tool_result message
-			// pair so the existing tool-pair waterfall + transcript
-			// renderers pick it up without a Codex-specific branch.
+			// Codex's web_search_end payload carries the `query` and
+			// `action` but no results — the actual search output
+			// arrives folded into the next assistant message. Emit
+			// only the Pre/Post hook pair (so the waterfall draws
+			// the tool span) and a tool_use message for the input;
+			// don't write a tool_result with toolInput stuffed into
+			// the result slot, which would duplicate input as output
+			// and inflate context-length heuristics keyed off
+			// tool_result.length.
 			toolInput := codexWebSearchInput(eventMsg.Query, eventMsg.Action)
 			w.insertCodexHookEvent(sid, ts, "PreToolUse", "web_search", toolInput, eventMsg.CallID, "", fctx)
 			w.insertCodexTypedMessage(sid, ts, "tool_use", "assistant", toolInput, fctx.model, "web_search", eventMsg.CallID, seen)
-			w.insertCodexHookEvent(sid, ts, "PostToolUse", "web_search", "", eventMsg.CallID, toolInput, fctx)
-			w.insertCodexTypedMessage(sid, ts, "tool_result", "user", toolInput, fctx.model, "web_search", eventMsg.CallID, seen)
+			w.insertCodexHookEvent(sid, ts, "PostToolUse", "web_search", "", eventMsg.CallID, "", fctx)
 		case "token_count":
 			// Codex emits token_count after each response with the
 			// per-call usage in info.last_token_usage. This is the
@@ -725,6 +729,12 @@ func (w *Watcher) processCodexResponseItem(sessionID string, ts time.Time, item 
 
 // insertCodexModelMessage stores a synthetic message with the model field set.
 // This makes the model visible in session detail KPI and cost calculation.
+//
+// The row carries message_type='usage' so the timeline renderer
+// (sessions.js push step) can drop it explicitly — without that gate
+// it'd surface as a blank assistant entry. message_type='usage' is
+// also the shape insertCodexUsageMessage writes; both are synthetic
+// metadata rows, never displayed.
 func (w *Watcher) insertCodexModelMessage(sessionID string, ts time.Time, model string, seen map[string]struct{}) {
 	// NOT gated by codexLiveGate: this writes a row into tma1_messages,
 	// which the hook handler never duplicates (hooks only write
@@ -752,7 +762,7 @@ func (w *Watcher) insertCodexModelMessage(sessionID string, ts time.Time, model 
 
 	sql := fmt.Sprintf(
 		"INSERT INTO tma1_messages (ts, session_id, message_type, \"role\", content, model, tool_name, tool_use_id) "+
-			"VALUES (%d, '%s', 'assistant', 'assistant', '', '%s', '', '')",
+			"VALUES (%d, '%s', 'usage', 'assistant', '', '%s', '', '')",
 		msTs,
 		escapeSQLString(sessionID),
 		escapeSQLString(model),
@@ -870,13 +880,14 @@ func (w *Watcher) insertCodexTypedMessage(sessionID string, ts time.Time, messag
 }
 
 // insertCodexUsageMessage writes a per-call usage row sourced from
-// Codex JSONL's `event_msg.token_count` payload. The row is shaped
-// like the existing `insertCodexModelMessage` row (assistant /
-// assistant, empty content) but additionally populates the token
-// columns. The sessions.js Codex fallback path scans assistant rows
-// where at least one token column is > 0 to build apiCalls, so the
-// model-only rows insertCodexModelMessage writes are NOT picked up
-// here — only these usage rows are.
+// Codex JSONL's `event_msg.token_count` payload. The row uses a
+// dedicated `message_type='usage'` so it never collides with real
+// assistant transcript messages and the sessions.js timeline can
+// drop it via an explicit type check instead of an empty-content
+// heuristic. The sessions.js Codex fallback path scans usage rows
+// where at least one token column is > 0 to build apiCalls; the
+// model-only marker row insertCodexModelMessage writes (also
+// 'usage', but with NULL tokens) is skipped by the same > 0 guard.
 //
 // Dedup key includes the timestamp + every token field so a JSONL
 // replay on restart resolves to the same key and is skipped.
@@ -908,7 +919,7 @@ func (w *Watcher) insertCodexUsageMessage(sessionID string, ts time.Time, model 
 	sql := fmt.Sprintf(
 		"INSERT INTO tma1_messages (ts, session_id, message_type, \"role\", content, model, tool_name, tool_use_id, "+
 			"input_tokens, output_tokens, cache_read_tokens, reasoning_tokens) "+
-			"VALUES (%d, '%s', 'assistant', 'assistant', '', '%s', '', '', %d, %d, %d, %d)",
+			"VALUES (%d, '%s', 'usage', 'assistant', '', '%s', '', '', %d, %d, %d, %d)",
 		msTs,
 		escapeSQLString(sessionID),
 		escapeSQLString(model),
