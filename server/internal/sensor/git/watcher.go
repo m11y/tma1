@@ -23,6 +23,15 @@ const (
 	// fire within this window (editor "atomic save" sequences typically
 	// emit Create + Remove + Write within a few ms).
 	fsEventDebounce = 500 * time.Millisecond
+
+	// maxWatchDirs bounds how many directories one watcher tries to register
+	// with fsnotify. On macOS each watched dir costs file descriptors (kqueue
+	// opens the dir and its entries), so an unbounded walk over a giant
+	// monorepo — or a root that resolved too wide — can exhaust the process
+	// fd limit and wedge the HTTP listener with EMFILE. 2048 covers real
+	// projects with headroom; past it we stop adding and warn once rather
+	// than leak descriptors or keep walking after Add starts failing.
+	maxWatchDirs = 2048
 )
 
 // projectWatcher watches one project root. It blends fsnotify (file
@@ -77,9 +86,14 @@ func (w *projectWatcher) start() error {
 	// Best-effort recursive watch by walking once at start. Subdirectories
 	// created later don't auto-attach — for Phase 1.2 this is acceptable;
 	// most projects have stable directory layouts.
-	if err := addRecursive(fsw, w.cfg.Root); err != nil {
+	added, stopped, err := addRecursive(fsw, w.cfg.Root, maxWatchDirs)
+	if err != nil {
 		_ = fsw.Close()
 		return err
+	}
+	if stopped {
+		w.logger.Warn("git watcher: stopped registering watches early (cap or fd limit); deeper subdirs unwatched",
+			"root", w.cfg.Root, "cap", maxWatchDirs, "watched", added)
 	}
 
 	w.wg.Add(2)
@@ -257,12 +271,12 @@ var staticIgnoreFragments = []string{
 	"/dist/",
 	"/build/",
 	"/target/",
-	"/bin/",          // Go build outputs (server/bin, tooling). Dropped here
-	"/out/",          // Java / generic build output dir
-	"/vendor/",       // Go / PHP / Ruby vendored deps
-	"/.venv/",        // Python venv
-	"/venv/",         // Python venv (alt)
-	"/.tma1/",        // tma1's own data dir (avoids self-noise loop)
+	"/bin/",    // Go build outputs (server/bin, tooling). Dropped here
+	"/out/",    // Java / generic build output dir
+	"/vendor/", // Go / PHP / Ruby vendored deps
+	"/.venv/",  // Python venv
+	"/venv/",   // Python venv (alt)
+	"/.tma1/",  // tma1's own data dir (avoids self-noise loop)
 	"/.idea/",
 	"/.vscode/",
 	"/__pycache__/",
@@ -273,6 +287,24 @@ var staticIgnoreFragments = []string{
 
 var staticIgnoreSuffixes = []string{
 	".pyc", ".swp", ".swo", ".log", ".DS_Store",
+}
+
+// systemRootPrefixes are absolute, filesystem-root OS trees we never walk.
+// Matched by PREFIX (not substring like staticIgnoreFragments) so a project
+// that merely contains — or is named — "Library" / "System" / "Applications"
+// is still watched; only the real OS trees mounted at "/" are blocked.
+//
+// Defence in depth behind resolveProjectRoot, which already refuses any root
+// without a .git / project marker. It exists because a single misresolved
+// "/" root walking /Applications was enough to exhaust file descriptors.
+// User-level trees (~/Library) are deliberately absent: they carry no marker
+// so P0 already declines them, and the fd weight lives in the root-level
+// /Applications anyway. /Volumes is absent too — projects legitimately live
+// on external disks.
+var systemRootPrefixes = []string{
+	"/Applications/",
+	"/Library/",
+	"/System/",
 }
 
 // staticShouldIgnorePath is the project-agnostic ignore check. Tests
@@ -292,6 +324,11 @@ func staticShouldIgnorePath(p string) bool {
 	normalized := strings.ReplaceAll(p, "\\", "/")
 	for _, frag := range staticIgnoreFragments {
 		if strings.Contains(normalized, frag) {
+			return true
+		}
+	}
+	for _, prefix := range systemRootPrefixes {
+		if strings.HasPrefix(normalized, prefix) {
 			return true
 		}
 	}
@@ -329,11 +366,20 @@ func (w *projectWatcher) shouldIgnorePath(p string) bool {
 	return false
 }
 
-// addRecursive walks root and registers every directory with the watcher,
-// skipping ignored paths. Errors on individual descents are logged but not
-// fatal — partial coverage is better than none.
-func addRecursive(fsw *fsnotify.Watcher, root string) error {
-	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+// addRecursive walks root and registers up to limit directories with the
+// watcher, skipping ignored paths. It returns the number of directories
+// successfully added and whether the walk stopped early — either because it
+// hit limit or because fsnotify.Add began failing. Walk errors are non-fatal
+// (partial coverage beats none).
+//
+// Stopping on the first Add failure matters: once Add returns EMFILE/ENOSPC
+// the fd/watch table is full, so every further Add fails too. Continuing the
+// traversal would just burn time and IO on a doomed walk — exactly the cost
+// this watcher cap exists to avoid.
+func addRecursive(fsw *fsnotify.Watcher, root string, limit int) (int, bool, error) {
+	added := 0
+	stopped := false
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -343,9 +389,18 @@ func addRecursive(fsw *fsnotify.Watcher, root string) error {
 		if staticShouldIgnorePath(path + "/") {
 			return filepath.SkipDir
 		}
-		_ = fsw.Add(path)
+		if added >= limit {
+			stopped = true // hit the watch cap
+			return filepath.SkipAll
+		}
+		if fsw.Add(path) != nil {
+			stopped = true // Add failing (fd/watch exhaustion) — abandon the walk
+			return filepath.SkipAll
+		}
+		added++
 		return nil
 	})
+	return added, stopped, err
 }
 
 // readGitHead returns the SHA of HEAD or "" on failure. The context lets a
