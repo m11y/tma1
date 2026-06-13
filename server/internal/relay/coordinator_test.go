@@ -172,7 +172,7 @@ func TestTargetBusyClearsReservation(t *testing.T) {
 	}
 	// Reservation must be cleared → a second attempt actually re-tries Wake
 	// (called twice) rather than being short-circuited as still-pending.
-	c.Signal(context.Background(), StagePlanReady, RoleDriver, "/repo", "s")
+	_, _ = c.Signal(context.Background(), StagePlanReady, RoleDriver, "/repo", "s")
 	if fw.called != 2 {
 		t.Fatalf("waker called %d times, want 2 (reservation not cleared on busy)", fw.called)
 	}
@@ -186,7 +186,7 @@ func TestRegisterClearsStalePending(t *testing.T) {
 	c := newTestCoord(NewRegistry(fw))
 	c.Register(Target{Role: RoleReviewer, SessionID: "r1", CWD: "/repo"})
 	c.Register(Target{Role: RoleDriver, SessionID: "d1", CWD: "/repo"})
-	c.Signal(context.Background(), StagePlanReady, RoleDriver, "/repo", "s") // pending[reviewer] set
+	_, _ = c.Signal(context.Background(), StagePlanReady, RoleDriver, "/repo", "s") // pending[reviewer] set
 
 	// Reviewer crashed and restarted as a new session.
 	c.Register(Target{Role: RoleReviewer, SessionID: "r2", CWD: "/repo"})
@@ -234,7 +234,7 @@ func TestStopCancelsTimeout(t *testing.T) {
 	c.Register(Target{Role: RoleReviewer, SessionID: "r1", CWD: "/repo"})
 	c.Register(Target{Role: RoleDriver, SessionID: "d1", CWD: "/repo"})
 
-	c.Signal(context.Background(), StagePlanReady, RoleDriver, "/repo", "s")
+	_, _ = c.Signal(context.Background(), StagePlanReady, RoleDriver, "/repo", "s")
 	c.Stop()
 	time.Sleep(80 * time.Millisecond)
 	fw.mu.Lock()
