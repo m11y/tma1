@@ -14,7 +14,7 @@ work without copy-pasting it manually.
 
 This skill is auto-selected when the user mentions reading another agent's
 output on the current project, or when they explicitly type
-`/tma1-peer [agent] [count]`. Parse:
+`/tma1-peer [agent] [count] [messages]`. Parse:
 
 - First positional arg (optional): peer agent name (`claude` / `claude_code`
   / `openclaw` / `copilot` / `copilot_cli` / `all`). **If this arg is a bare
@@ -23,8 +23,10 @@ output on the current project, or when they explicitly type
   it as an unknown agent.
 - Second positional arg (optional): count of recent sessions to pull,
   integer 1-5, default 1.
+- Third positional arg (optional): messages per session to pull,
+  integer 1-100, default 10.
 
-If neither is supplied, treat as `all` with count 1.
+If none is supplied, treat as `all` with count 1 and 10 messages.
 
 ## Normalize the agent name
 
@@ -50,7 +52,7 @@ the `get_peer_sessions` tool on that server with:
 | --------------- | ------------------------------------------------------ |
 | `agent_source`  | the canonical name from the table above (or `""`)      |
 | `limit`         | the parsed count — **when the user gave a count you MUST pass it** (don't default to 1); omit only when none was given (server default `1`, clamp `[1, 5]`) |
-| `message_limit` | `30`                                                   |
+| `message_limit` | the parsed third arg if supplied (clamp `[1, 100]`), otherwise `10` |
 
 If your runtime addresses MCP tools by a prefixed name (for example
 `tma1.get_peer_sessions` or `mcp_tma1_get_peer_sessions`), use whichever
@@ -95,7 +97,7 @@ quote the failed agent(s) instead of asserting silence.
 ## Examples
 
 User: "what did claude leave on this project?"
-You: (call `get_peer_sessions` with `agent_source: "claude_code", limit: 1, message_limit: 30`)
+You: (call `get_peer_sessions` with `agent_source: "claude_code", limit: 1, message_limit: 10`)
 You: "Claude Code reviewed `server/internal/handler/anomalies.go` 8 minutes ago and flagged three concrete issues:
 1. fetchEmits has no LIMIT — body cap will truncate before the query finishes.
 2. `applyForceColor` env dedup is libc-dependent.
@@ -103,7 +105,7 @@ You: "Claude Code reviewed `server/internal/handler/anomalies.go` 8 minutes ago 
 Want me to address all three or pick one?"
 
 User: `/tma1-peer copilot 2`
-You: (call `get_peer_sessions` with `agent_source: "copilot_cli", limit: 2, message_limit: 30`)
+You: (call `get_peer_sessions` with `agent_source: "copilot_cli", limit: 2, message_limit: 10`)
 You: "Copilot CLI ran two sessions on this project today — the most recent
 deployed staging 20 min ago (success), the prior one 2 h ago ran the
 test suite and hit a flake in `TestSemAcceptsUpToCapacity`."

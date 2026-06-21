@@ -1,6 +1,6 @@
 ---
 description: Pull recent session content from peer coding agents (Codex, OpenClaw, Copilot CLI) that worked on this project.
-argument-hint: "[agent] [count]"
+argument-hint: "[agent] [count] [messages]"
 allowed-tools: ["mcp__tma1__get_peer_sessions"]
 ---
 
@@ -20,7 +20,8 @@ file carries the essential rules for the explicit-invocation path.
   - **a bare integer** (e.g. `/tma1-peer 3`) → it's the count, not an agent: use
     `agent_source: ""` and that integer as the count. Do **not** reject it.
   - **Anything else** → reply `unknown peer agent "<X>"; available: codex, openclaw, copilot, all` and **STOP**.
-- 2nd token (optional) → integer, default `1`, clamped to `[1, 5]` server-side.
+- 2nd token (optional) → count, integer, default `1`, clamped to `[1, 5]` server-side.
+- 3rd token (optional) → messages per session, integer, default `10`, clamp `[1, 100]`.
 
 ## Call the tool
 
@@ -28,7 +29,8 @@ file carries the essential rules for the explicit-invocation path.
 - `agent_source`: the normalized name (or `""`)
 - `limit`: parsed count — **when a count was given, you MUST pass it** (don't
   silently default to 1); e.g. `codex 3` → `limit: 3`
-- `message_limit`: `30`
+- `message_limit`: parsed 3rd token if supplied (clamp `[1, 100]`), else `10`;
+  e.g. `codex 3 30` → `message_limit: 30`
 
 ## Use the response
 

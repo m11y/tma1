@@ -1,7 +1,7 @@
 ---
 name: tma1-peer
 description: "Pull recent session content from peer coding agents (Codex, OpenClaw, Copilot CLI) that worked on the same project. Invoke when the user wants you to read another agent's review feedback, see what someone else tried, or act on cross-agent context. Trigger phrases: \"what did codex do\", \"what did openclaw do\", \"what did copilot do\", \"peer sessions\", \"cross-agent context\", \"/tma1-peer\"."
-argument-hint: "[agent] [count]"
+argument-hint: "[agent] [count] [messages]"
 allowed-tools: ["mcp__tma1__get_peer_sessions"]
 ---
 
@@ -15,9 +15,10 @@ copy-pasting it manually.
 ## Syntax
 
 ```
-/tma1-peer                 # all peers, latest 1 session each
+/tma1-peer                 # all peers, latest 1 session each, 10 messages
 /tma1-peer codex           # codex, latest 1 session
 /tma1-peer codex 3         # codex, latest 3 sessions
+/tma1-peer codex 3 30      # codex, latest 3 sessions, 30 messages each
 /tma1-peer openclaw        # openclaw, latest 1
 /tma1-peer copilot 2       # copilot_cli (alias), latest 2
 /tma1-peer all 2           # all peers, 2 each
@@ -31,6 +32,7 @@ copy-pasting it manually.
      count, not an agent — use `agent_source: ""` (all peers) and that integer
      as the count. Do NOT reject it as an unknown agent.
    - Second token (optional): count (integer 1-5).
+   - Third token (optional): messages per session (integer 1-100, default 10).
 2. **Normalize the agent name**:
    - `codex` → `codex`
    - `openclaw` → `openclaw`
@@ -43,7 +45,8 @@ copy-pasting it manually.
    - `limit`: the parsed count. **When the user gave a count, you MUST pass it**
      — do not silently fall back to 1. Omit only when no count was supplied
      (server default 1, clamp to [1, 5]). E.g. `codex 3` → `{agent_source: "codex", limit: 3}`.
-   - `message_limit`: 30
+   - `message_limit`: the parsed third token if supplied (clamp to [1, 100]),
+     otherwise `10`. E.g. `codex 3 30` → `{agent_source: "codex", limit: 3, message_limit: 30}`.
 4. **Read the returned conversation messages** and use them as direct input
    for your next reasoning step. **Do not paraphrase** — when acting on
    peer feedback, quote the specific points the peer made so the user can
@@ -76,7 +79,7 @@ this project" rather than fabricating context.
 ## Examples
 
 User: `/tma1-peer codex`
-You: (call tool with `agent_source: "codex", limit: 1, message_limit: 30`)
+You: (call tool with `agent_source: "codex", limit: 1, message_limit: 10`)
 You: "Codex reviewed `auth.go` 12 min ago and left three concrete issues:
      1. ... 2. ... 3. ... Want me to address all three or pick one?"
 
