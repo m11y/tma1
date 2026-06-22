@@ -28,11 +28,12 @@ copy-pasting it manually.
 
 1. **Parse the user's arguments** after `/tma1-peer`:
    - First token (optional): agent name.
-   - **If the first token is a bare integer** (e.g. `/tma1-peer 3`), it is the
-     count, not an agent — use `agent_source: ""` (all peers) and that integer
-     as the count. Do NOT reject it as an unknown agent.
-   - Second token (optional): count (integer 1-5).
-   - Third token (optional): messages per session (integer 1-100, default 10).
+   - **If the first token is a bare integer** (e.g. `/tma1-peer 3`), there's no
+     agent token: it is the count, and the next integer (if any) is messages
+     per session — use `agent_source: ""` (all peers). Do NOT reject it as an
+     unknown agent. E.g. `/tma1-peer 3 30` → count 3, 30 messages.
+   - Count (first integer, after the agent token when present): integer 1-5, default 1.
+   - Messages per session (the integer after count): integer 1-100, default 10.
 2. **Normalize the agent name**:
    - `codex` → `codex`
    - `openclaw` → `openclaw`

@@ -18,13 +18,13 @@ output on the current project, or when they explicitly type
 
 - First positional arg (optional): peer agent name (`claude` / `claude_code`
   / `openclaw` / `copilot` / `copilot_cli` / `all`). **If this arg is a bare
-  integer** (e.g. `/tma1-peer 3`), it is the count, not an agent — use
-  `agent_source: ""` (all peers) and that integer as the count. Do not reject
-  it as an unknown agent.
-- Second positional arg (optional): count of recent sessions to pull,
-  integer 1-5, default 1.
-- Third positional arg (optional): messages per session to pull,
-  integer 1-100, default 10.
+  integer** (e.g. `/tma1-peer 3`), there's no agent token: it is the count, and
+  the next integer (if any) is messages per session — use `agent_source: ""`
+  (all peers). Do not reject it as an unknown agent. E.g. `/tma1-peer 3 30` →
+  count 3, 30 messages.
+- Count (first integer, after the agent name when present): recent sessions to
+  pull, integer 1-5, default 1.
+- Messages per session (the integer after count): integer 1-100, default 10.
 
 If none is supplied, treat as `all` with count 1 and 10 messages.
 

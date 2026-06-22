@@ -17,11 +17,13 @@ file carries the essential rules for the explicit-invocation path.
   - `openclaw` → `openclaw`
   - `copilot` / `copilot_cli` → `copilot_cli`
   - `all` / `*` / empty → `""` (all peers, server excludes the caller)
-  - **a bare integer** (e.g. `/tma1-peer 3`) → it's the count, not an agent: use
-    `agent_source: ""` and that integer as the count. Do **not** reject it.
+  - **a bare integer** (e.g. `/tma1-peer 3`) → there's no agent token: this
+    integer is the count and the *next* integer (if any) is messages per session.
+    Use `agent_source: ""`. Do **not** reject it. E.g. `/tma1-peer 3 30` → count
+    3, 30 messages.
   - **Anything else** → reply `unknown peer agent "<X>"; available: codex, openclaw, copilot, all` and **STOP**.
-- 2nd token (optional) → count, integer, default `1`, clamped to `[1, 5]` server-side.
-- 3rd token (optional) → messages per session, integer, default `10`, clamp `[1, 100]`.
+- Count (the first integer, after the agent token when present) → default `1`, clamp `[1, 5]` server-side.
+- Messages per session (the integer after count) → default `10`, clamp `[1, 100]`.
 
 ## Call the tool
 
