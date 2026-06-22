@@ -1,6 +1,6 @@
 ---
 description: Pull recent session content from peer coding agents (Codex, OpenClaw, Copilot CLI) that worked on this project.
-argument-hint: "[agent] [count]"
+argument-hint: "[agent] [count] [messages]"
 allowed-tools: ["mcp__tma1__get_peer_sessions"]
 ---
 
@@ -17,10 +17,13 @@ file carries the essential rules for the explicit-invocation path.
   - `openclaw` → `openclaw`
   - `copilot` / `copilot_cli` → `copilot_cli`
   - `all` / `*` / empty → `""` (all peers, server excludes the caller)
-  - **a bare integer** (e.g. `/tma1-peer 3`) → it's the count, not an agent: use
-    `agent_source: ""` and that integer as the count. Do **not** reject it.
+  - **a bare integer** (e.g. `/tma1-peer 3`) → there's no agent token: this
+    integer is the count and the *next* integer (if any) is messages per session.
+    Use `agent_source: ""`. Do **not** reject it. E.g. `/tma1-peer 3 30` → count
+    3, 30 messages.
   - **Anything else** → reply `unknown peer agent "<X>"; available: codex, openclaw, copilot, all` and **STOP**.
-- 2nd token (optional) → integer, default `1`, clamped to `[1, 5]` server-side.
+- Count (the first integer, after the agent token when present) → default `1`, clamp `[1, 5]` server-side.
+- Messages per session (the integer after count) → default `10`, clamp `[1, 100]`.
 
 ## Call the tool
 
@@ -28,7 +31,8 @@ file carries the essential rules for the explicit-invocation path.
 - `agent_source`: the normalized name (or `""`)
 - `limit`: parsed count — **when a count was given, you MUST pass it** (don't
   silently default to 1); e.g. `codex 3` → `limit: 3`
-- `message_limit`: `30`
+- `message_limit`: parsed 3rd token if supplied (clamp `[1, 100]`), else `10`;
+  e.g. `codex 3 30` → `message_limit: 30`
 
 ## Use the response
 
