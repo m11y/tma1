@@ -687,6 +687,28 @@ If startup fails with `greptimedb: did not become healthy: timeout after 30s`:
    tma1-server
    ```
 
+### GreptimeDB download is slow or stuck (restricted network)
+
+On a slow or restricted link, fetching the GreptimeDB binary (~150 MB from GitHub releases) can crawl or fail, leaving setup unable to reach a healthy state. Route the download through a proxy — both the installer (`curl`) and the `tma1-server` fallback download (Go's default transport) honor the standard proxy variables:
+
+```bash
+export https_proxy=http://your-proxy:port
+export http_proxy=http://your-proxy:port
+curl -fsSL https://tma1.ai/install.sh | bash
+```
+
+The installer pre-fetches GreptimeDB via GreptimeDB's official install script, so this is normally a one-time cost at install. If `tma1-server` is downloading GreptimeDB itself on first start (no installer pre-fetch), export the same variables before launching it.
+
+### Installer fails with "Failed to resolve latest version"
+
+The installer first asks GitHub for the latest release tag. When the GitHub API is unreachable or rate-limited, that lookup fails and the install aborts. Skip the lookup by pinning the version explicitly (pick a tag from the [releases page](https://github.com/tma1-ai/tma1/releases)):
+
+```bash
+curl -fsSL https://tma1.ai/install.sh | TMA1_VERSION=v0.1.0 bash
+```
+
+The GreptimeDB version can be pinned the same way with `TMA1_GREPTIMEDB_VERSION` if its download step can't resolve a version either.
+
 ---
 
 ## Query Reference
